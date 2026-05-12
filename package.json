@@ -3,11 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Локальный модуль «Лена»: тендерный контракт, валидация, матрица соответствия (без Windmill, без зависимостей)",
+  "description": "Модуль «Лена»: тендерный контракт, валидация, матрица; опционально Google Drive",
   "scripts": {
     "lena": "node src/cli.js"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "googleapis": "^149.0.0"
   }
 }

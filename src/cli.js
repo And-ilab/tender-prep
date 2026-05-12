@@ -14,6 +14,8 @@ function usage() {
     "  node src/cli.js snapshot <result.json> <out>  — нормализация в TenderSnapshot",
     "  node src/cli.js matrix <result.json> <out>    — матрица соответствия из результата парсера",
     "",
+    "  node src/cli.js drive …                        — Google Drive (см. node src/cli.js drive)",
+    "",
   ];
   console.error(lines.join("\n"));
   process.exitCode = 1;
@@ -22,7 +24,7 @@ function usage() {
 /**
  * @param {string[]} argv
  */
-function main(argv) {
+async function main(argv) {
   const [, , cmd, a, b] = argv;
   if (!cmd) {
     usage();
@@ -30,6 +32,12 @@ function main(argv) {
   }
 
   try {
+    if (cmd === "drive") {
+      const { runDrive } = await import("./drive/cli.js");
+      await runDrive(argv.slice(3));
+      return;
+    }
+
     if (cmd === "validate-input") {
       if (!a) usage();
       else {
@@ -102,4 +110,7 @@ function main(argv) {
   }
 }
 
-main(process.argv);
+main(process.argv).catch((e) => {
+  console.error(e instanceof Error ? e.message : String(e));
+  process.exitCode = 1;
+});
