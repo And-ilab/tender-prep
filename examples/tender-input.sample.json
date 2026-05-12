@@ -1,0 +1,12 @@
+{
+  "tender_id": "demo-001",
+  "document_urls": [
+    "https://example.com/izv.pdf",
+    "https://example.com/tz.docx"
+  ],
+  "locale": "ru",
+  "options": {
+    "extract_requirements": true,
+    "extract_deadlines": true
+  }
+}

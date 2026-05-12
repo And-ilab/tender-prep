@@ -1,0 +1,19 @@
+{
+  "tender_id": "demo-001",
+  "rows": [
+    {
+      "requirement_id": "R1",
+      "requirement_text": "Участник должен иметь опыт поставок аналогичного товара не менее 3 лет.",
+      "status": "open",
+      "evidence_ref": "—"
+    },
+    {
+      "requirement_id": "R2",
+      "requirement_text": "Гарантийный срок — не менее 24 месяцев.",
+      "status": "open",
+      "evidence_ref": "—",
+      "notes": "needs_review: проверить вручную"
+    }
+  ],
+  "generated_at": "2026-05-12T18:57:58.407Z"
+}

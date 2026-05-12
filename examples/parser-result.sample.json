@@ -1,0 +1,39 @@
+{
+  "tender_id": "demo-001",
+  "requirements": [
+    {
+      "id": "R1",
+      "text": "Участник должен иметь опыт поставок аналогичного товара не менее 3 лет.",
+      "source": { "file": "tz.pdf", "fragment": "п. 4.2", "page": 12 },
+      "confidence": 0.92,
+      "needs_review": false
+    },
+    {
+      "id": "R2",
+      "text": "Гарантийный срок — не менее 24 месяцев.",
+      "source": { "file": "tz.pdf", "page": 15 },
+      "confidence": 0.4,
+      "needs_review": true
+    }
+  ],
+  "deadlines": [
+    {
+      "id": "D1",
+      "label": "Окончание подачи заявок",
+      "datetime": "2026-06-01T18:00:00+03:00",
+      "source": { "file": "izv.pdf", "fragment": "дата окончания" },
+      "needs_review": false
+    }
+  ],
+  "criteria": [
+    {
+      "raw": "Цена контракта — 40 баллов; качество — 60.",
+      "source": { "file": "docs.pdf", "page": 3 },
+      "needs_review": false
+    }
+  ],
+  "meta": {
+    "parser_version": "local-demo",
+    "warnings": []
+  }
+}
