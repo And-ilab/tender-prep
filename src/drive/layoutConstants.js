@@ -6,7 +6,7 @@ export const LENA_ROOT_FOLDER = "_lena";
  * - templates — копируемые шаблоны заявок
  * - library — справочники, регламенты, выдержки (не обязательно «шаблоны на копирование»)
  * - context — общий контекст для Лены между тендерами
- * - tenders — все закупки; внутри опционально год, затем id тендера
+ * - tenders — закупки: по умолчанию `_lena/tenders/<ГГГГ>/<tender_id>/…` (год = `LENA_DEFAULT_TENDER_YEAR` или текущий календарный); режим `flat` — без года в пути
  */
 export const LENA_SUB = {
   templates: "templates",
@@ -34,11 +34,25 @@ export function tenderFolderName(tenderId) {
 }
 
 /**
+ * Год по умолчанию для путей `tenders/<ГГГГ>/…` (переменная окружения или текущий календарный год).
+ * @returns {string}
+ */
+export function defaultTenderCalendarYear() {
+  const env = process.env.LENA_DEFAULT_TENDER_YEAR?.trim();
+  if (env && /^\d{4}$/.test(env)) {
+    return env;
+  }
+  return String(new Date().getFullYear());
+}
+
+/**
  * @param {string | undefined} year
- * @returns {string | undefined}
+ * @returns {string}
  */
 export function normalizeTenderYear(year) {
-  if (!year?.trim()) return undefined;
+  if (!year?.trim()) {
+    throw new Error("Год не задан");
+  }
   const y = year.trim();
   if (!/^\d{4}$/.test(y)) {
     throw new Error(`Год тендера должен быть четырьмя цифрами (например 2026), получено: ${year}`);

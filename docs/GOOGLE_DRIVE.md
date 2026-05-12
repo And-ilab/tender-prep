@@ -18,24 +18,23 @@
     library/       ← справочники, регламенты, выдержки (не обязательно «шаблон на копирование»)
     context/       ← общий контекст между тендерами: стиль, глоссарий, фрагменты прошлых ответов
     tenders/
-      <tender_id>/                    ← если команда без года
-        inputs/
-        drafts/
-        exports/
-        attachments/                 ← доказательства, приложения к матрице
-        notes/                       ← разъяснения, переписка, короткие заметки
-      <ГГГГ>/                        ← опционально: как ваши папки 2024, 2025, 2026
+      <ГГГГ>/                        ← по умолчанию текущий год (или LENA_DEFAULT_TENDER_YEAR)
         <tender_id>/
           inputs/
           drafts/
           exports/
-          attachments/
-          notes/
+          attachments/               ← доказательства, приложения к матрице
+          notes/                     ← разъяснения, переписка, короткие заметки
+      <tender_id>/                   ← только если явно указали режим flat (без года)
+        inputs/
+        …
 ```
 
-**Год в пути:** если вызываете `workspace-tender <root> <tenderId> 2026`, папка тендера будет **`_lena/tenders/2026/<tender_id>/…`** (рядом с вашей привычкой вести закупки по годам). Без третьего аргумента год **не** добавляется: **`_lena/tenders/<tender_id>/…`** (как раньше).
+**Год в пути (как у вас по годам):** по умолчанию тендер создаётся в **`_lena/tenders/<ГГГГ>/<tender_id>/…`**, где **`<ГГГГ>`** — текущий календарный год (например 2026), либо значение переменной **`LENA_DEFAULT_TENDER_YEAR`**, если задали её в окружении (удобно в конце года). Явно другой год: третий аргумент **`2025`**. Старый «плоский» путь без года: третий аргумент **`flat`** (для уже существующих деревьев).
 
-Ваши уже существующие папки вроде **«ГС Ритейл» → 2026** можно **не трогать**: `_lena` — отдельное служебное дерево внутри той корневой папки, которую вы указали в `workspace-ensure` (это может быть сама «ГС Ритейл» или родитель «Подачи на тендер» — как решите).
+Ваши папки **«ГС Ритейл» → 2024 / 2025 / 2026** на «Моём диске» можно оставить как есть: `_lena` — отдельное служебное дерево **внутри той корневой папки**, которую вы передаёте в `workspace-ensure` (часто это и есть «ГС Ритейл»).
+
+**Важно:** если вы раньше создавали тендеры **без года** (`_lena/tenders/<id>/…`), для новых команд по умолчанию путь станет **с годом**. Старые папки не удаляются; для новых операций с тем же id без года передайте **`flat`**.
 
 **Шаблоны:** `_lena/templates` — `templates-list`, `agent-bundle`.
 
@@ -43,7 +42,7 @@
 
 **Контекст:** `_lena/context` — `context-list`, `context-pull`.
 
-**Тендер:** `workspace-tender` (+ опционально год), внутри — `inputs`, `drafts`, `exports`, `attachments`, `notes`. Копия шаблона: `template-copy` (см. справку `drive` — опционально год и имя файла).
+**Тендер:** `workspace-tender` (год по умолчанию или `ГГГГ`, либо `flat`); внутри — `inputs`, `drafts`, `exports`, `attachments`, `notes`. Копия шаблона: `template-copy` (см. `drive` — `flat`, год или только новое имя).
 
 ## Настройка доступа (сервисный аккаунт)
 
@@ -67,14 +66,14 @@ cd tender-prep
 |---------|------------|
 | `drive workspace-ensure <root>` | Создать `_lena/{templates,library,context,tenders}` при отсутствии |
 | `drive workspace-layout <root>` | Показать id папок (без создания) |
-| `drive workspace-tender <root> <tenderId> [ГГГГ]` | Папка тендера + `inputs` / `drafts` / `exports` / `attachments` / `notes`; при годе — `tenders/<ГГГГ>/<id>/` |
+| `drive workspace-tender <root> <tenderId> [ГГГГ\|flat]` | Папка тендера; по умолчанию год в пути; `flat` — без года (legacy) |
 | `drive templates-list <root>` | Список в `_lena/templates` |
 | `drive library-list <root>` | Список в `_lena/library` |
 | `drive context-list <root>` | Список в `_lena/context` |
 | `drive context-pull <root> <локальнаяПапка>` | Выгрузить контекст локально |
-| `drive template-copy <root> <id> <tenderId> [ГГГГ] [имя]` | Копия в `drafts`; опционально год и новое имя |
+| `drive template-copy <root> <id> <tenderId> [flat\|ГГГГ\|имя] [имя]` | Копия в `drafts`; год по умолчанию; `flat` — без года |
 | `drive item-rename <id> <новоеИмя>` | Переименовать файл или папку |
-| `drive agent-bundle <root> [tenderId] [ГГГГ]` | JSON: папки, шаблоны, library, контекст, тендер |
+| `drive agent-bundle <root> [tenderId] [ГГГГ\|flat]` | JSON: папки, шаблоны, library, контекст, тендер |
 
 Низкоуровневые `list`, `meta`, `download`, `upload` сохраняются для произвольных путей.
 
@@ -83,8 +82,9 @@ cd tender-prep
 ```powershell
 $env:GOOGLE_DRIVE_CREDENTIALS = "C:\secrets\lena-drive.json"
 node src/cli.js drive workspace-ensure "https://drive.google.com/drive/folders/ROOT_ID"
-node src/cli.js drive workspace-tender "ROOT_ID" "zakupka-2026-042" 2026
-node src/cli.js drive agent-bundle "ROOT_ID" "zakupka-2026-042" 2026
+node src/cli.js drive workspace-tender "ROOT_ID" "zakupka-2026-042"
+node src/cli.js drive workspace-tender "ROOT_ID" "old-flat-tender" flat
+node src/cli.js drive agent-bundle "ROOT_ID" "zakupka-2026-042"
 ```
 
 `<root>` везде — **id или URL** той самой **корневой** папки проекта (не обязательно `_lena`).

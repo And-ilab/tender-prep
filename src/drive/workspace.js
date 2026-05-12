@@ -5,6 +5,7 @@ import {
   LENA_ROOT_FOLDER,
   LENA_SUB,
   TENDER_SUB,
+  defaultTenderCalendarYear,
   normalizeTenderYear,
   tenderFolderName,
 } from "./layoutConstants.js";
@@ -90,10 +91,17 @@ export async function ensureLenaTree(userRootId) {
 /**
  * @param {string} userRootId
  * @param {string} tenderId
- * @param {{ year?: string }} [opts] — если `year` задан (2026), путь: `tenders/2026/<tenderId>/…` (как в вашей структуре по годам)
+ * @param {{ flat?: boolean, year?: string }} [opts]
+ *   - по умолчанию (без `flat`): `_lena/tenders/<ГГГГ>/<tenderId>/…`, год = `LENA_DEFAULT_TENDER_YEAR` или текущий календарный;
+ *   - `flat: true`: старый путь `_lena/tenders/<tenderId>/…` без года.
  */
 export async function ensureTenderTree(userRootId, tenderId, opts) {
-  const year = opts?.year ? normalizeTenderYear(opts.year) : undefined;
+  const flat = opts?.flat === true;
+  const year = flat
+    ? undefined
+    : opts?.year
+      ? normalizeTenderYear(opts.year)
+      : defaultTenderCalendarYear();
   const { layout, created } = await ensureLenaTree(userRootId);
   const tendersId = layout.tendersId;
   if (!tendersId) {
@@ -101,7 +109,7 @@ export async function ensureTenderTree(userRootId, tenderId, opts) {
   }
 
   let parentForTender = tendersId;
-  if (year) {
+  if (!flat && year) {
     const ry = await ensureChildFolder(tendersId, year);
     if (ry.created) created.push(`${LENA_ROOT_FOLDER}/${LENA_SUB.tenders}/${year}`);
     parentForTender = ry.id;
@@ -111,7 +119,7 @@ export async function ensureTenderTree(userRootId, tenderId, opts) {
   const r0 = await ensureChildFolder(parentForTender, tName);
   if (r0.created) {
     created.push(
-      year
+      !flat && year
         ? `${LENA_ROOT_FOLDER}/${LENA_SUB.tenders}/${year}/${tName}`
         : `${LENA_ROOT_FOLDER}/${LENA_SUB.tenders}/${tName}`,
     );
@@ -133,7 +141,8 @@ export async function ensureTenderTree(userRootId, tenderId, opts) {
     layout,
     tender: {
       tenderId,
-      year: year ?? null,
+      year: flat ? null : year,
+      layoutMode: flat ? "flat" : "by_year",
       folderId: tenderRoot,
       inputsId: rIn.id,
       draftsId: rDr.id,
@@ -224,10 +233,13 @@ export async function pullContextToLocal(userRootId, localDir) {
  * @param {string} userRootId
  * @param {string} templateFileId
  * @param {string} tenderId
- * @param {{ year?: string, newName?: string }} [opts]
+ * @param {{ flat?: boolean, year?: string, newName?: string }} [opts]
  */
 export async function copyTemplateToTenderDrafts(userRootId, templateFileId, tenderId, opts) {
-  const { tender } = await ensureTenderTree(userRootId, tenderId, { year: opts?.year });
+  const { tender } = await ensureTenderTree(userRootId, tenderId, {
+    flat: opts?.flat === true,
+    year: opts?.year,
+  });
   const { files } = await listTemplateFiles(userRootId);
   const tpl = files.find((x) => x.id === templateFileId);
   const name =
@@ -239,9 +251,9 @@ export async function copyTemplateToTenderDrafts(userRootId, templateFileId, ten
 /**
  * @param {string} userRootId
  * @param {string} [tenderId]
- * @param {string} [tenderYear] — четыре цифры, вместе с tenderId задаёт путь `tenders/<год>/…`
+ * @param {{ flat?: boolean, year?: string }} [tenderOpts]
  */
-export async function buildAgentDriveBundle(userRootId, tenderId, tenderYear) {
+export async function buildAgentDriveBundle(userRootId, tenderId, tenderOpts) {
   const layout = await resolveLayoutIds(userRootId);
   const templates = await listTemplateFiles(userRootId);
   const library = await listLibraryFiles(userRootId);
@@ -281,11 +293,14 @@ export async function buildAgentDriveBundle(userRootId, tenderId, tenderYear) {
   };
 
   if (tenderId?.trim()) {
-    const year = tenderYear?.trim() ? normalizeTenderYear(tenderYear) : undefined;
-    const { tender } = await ensureTenderTree(userRootId, tenderId, { year });
+    const { tender } = await ensureTenderTree(userRootId, tenderId, {
+      flat: tenderOpts?.flat === true,
+      year: tenderOpts?.year,
+    });
     bundle.tender = {
       tenderId: tender.tenderId,
       year: tender.year,
+      layoutMode: tender.layoutMode,
       rootFolderId: tender.folderId,
       inputsFolderId: tender.inputsId,
       draftsFolderId: tender.draftsId,

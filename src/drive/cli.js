@@ -27,20 +27,20 @@ function usage() {
       "Рабочее пространство (_lena/ внутри вашей корневой папки на Диске):",
       "  drive workspace-ensure <rootFolderUrlOrId>     — создать _lena: templates, library, context, tenders",
       "  drive workspace-layout <rootFolderUrlOrId>   — показать id папок (без создания)",
-      "  drive workspace-tender <root> <tenderId> [ГГГГ] — папка тендера; если год (2026) — путь tenders/2026/<id>/…",
+      "  drive workspace-tender <root> <tenderId> [ГГГГ|flat] — по умолчанию год = текущий (или LENA_DEFAULT_TENDER_YEAR); flat — путь без года",
       "",
       "Шаблоны, справочники, контекст:",
       "  drive templates-list <root>                  — файлы в _lena/templates",
       "  drive library-list <root>                    — файлы в _lena/library (регламенты, справочники)",
       "  drive context-list <root>                    — файлы в _lena/context",
       "  drive context-pull <root> <localDir>         — скачать контекст локально (txt/csv/бинарники)",
-      "  drive template-copy <root> <templateFileId> <tenderId> [ГГГГ] [новоеИмя]",
+      "  drive template-copy <root> <templateFileId> <tenderId> [flat|ГГГГ|новоеИмя] [новоеИмя]",
       "",
       "Прочее:",
       "  drive item-rename <fileOrFolderId> <новоеИмя>",
-      "  drive agent-bundle <root> [tenderId] [ГГГГ]   — JSON для агента (шаблоны, library, контекст, тендер)",
+      "  drive agent-bundle <root> [tenderId] [ГГГГ|flat]   — JSON для агента",
       "",
-      "Переменные: GOOGLE_DRIVE_CREDENTIALS или GOOGLE_APPLICATION_CREDENTIALS — путь к JSON ключу.",
+      "Переменные: GOOGLE_DRIVE_CREDENTIALS (или GOOGLE_APPLICATION_CREDENTIALS), опционально LENA_DEFAULT_TENDER_YEAR.",
       "См. docs/GOOGLE_DRIVE.md",
       "",
     ].join("\n"),
@@ -123,8 +123,9 @@ export async function runDrive(args) {
       if (!a || !b) usage();
       else {
         const root = resolveDriveId(a);
-        const year = c && /^\d{4}$/.test(c.trim()) ? c.trim() : undefined;
-        const out = await ensureTenderTree(root, b, { year });
+        const flat = c && c.trim().toLowerCase() === "flat";
+        const year = !flat && c && /^\d{4}$/.test(c.trim()) ? c.trim() : undefined;
+        const out = await ensureTenderTree(root, b, { flat, year });
         console.log(JSON.stringify({ ok: true, ...out }, null, 2));
       }
       return;
@@ -176,17 +177,23 @@ export async function runDrive(args) {
         const root = resolveDriveId(a);
         const templateId = resolveDriveId(b);
         const tenderId = c;
+        let flat = false;
         /** @type {string | undefined} */
         let year;
         /** @type {string | undefined} */
         let newName;
-        if (d && /^\d{4}$/.test(d.trim())) {
-          year = d.trim();
-          newName = e?.trim() || undefined;
-        } else {
-          newName = d?.trim() || undefined;
+        if (d) {
+          if (d.trim().toLowerCase() === "flat") {
+            flat = true;
+            newName = e?.trim() || undefined;
+          } else if (/^\d{4}$/.test(d.trim())) {
+            year = d.trim();
+            newName = e?.trim() || undefined;
+          } else {
+            newName = d.trim();
+          }
         }
-        const out = await copyTemplateToTenderDrafts(root, templateId, tenderId, { year, newName });
+        const out = await copyTemplateToTenderDrafts(root, templateId, tenderId, { flat, year, newName });
         console.log(JSON.stringify({ ok: true, ...out }, null, 2));
       }
       return;
@@ -206,8 +213,9 @@ export async function runDrive(args) {
       if (!a) usage();
       else {
         const root = resolveDriveId(a);
-        const year = c && /^\d{4}$/.test(c.trim()) ? c.trim() : undefined;
-        const bundle = await buildAgentDriveBundle(root, b, year);
+        const flat = c && c.trim().toLowerCase() === "flat";
+        const year = !flat && c && /^\d{4}$/.test(c.trim()) ? c.trim() : undefined;
+        const bundle = await buildAgentDriveBundle(root, b, { flat, year });
         console.log(JSON.stringify({ ok: true, bundle }, null, 2));
       }
       return;
