@@ -1,7 +1,13 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { ensureChildFolder, findChildFolderId } from "./folders.js";
-import { LENA_ROOT_FOLDER, LENA_SUB, TENDER_SUB, tenderFolderName } from "./layoutConstants.js";
+import {
+  LENA_ROOT_FOLDER,
+  LENA_SUB,
+  TENDER_SUB,
+  normalizeTenderYear,
+  tenderFolderName,
+} from "./layoutConstants.js";
 import {
   copyFileToFolder,
   downloadFile,
@@ -18,6 +24,7 @@ const GOOGLE_SHEET = "application/vnd.google-apps.spreadsheet";
  * @property {string} userRootId
  * @property {string | null} lenaRootId
  * @property {string | null} templatesId
+ * @property {string | null} libraryId
  * @property {string | null} contextId
  * @property {string | null} tendersId
  */
@@ -34,18 +41,20 @@ export async function resolveLayoutIds(userRootId) {
       userRootId,
       lenaRootId: null,
       templatesId: null,
+      libraryId: null,
       contextId: null,
       tendersId: null,
     };
   }
   const templatesId = await findChildFolderId(lenaRootId, LENA_SUB.templates);
+  const libraryId = await findChildFolderId(lenaRootId, LENA_SUB.library);
   const contextId = await findChildFolderId(lenaRootId, LENA_SUB.context);
   const tendersId = await findChildFolderId(lenaRootId, LENA_SUB.tenders);
-  return { userRootId, lenaRootId, templatesId, contextId, tendersId };
+  return { userRootId, lenaRootId, templatesId, libraryId, contextId, tendersId };
 }
 
 /**
- * Создаёт недостающие папки `_lena/templates`, `context`, `tenders`.
+ * Создаёт недостающие папки под `_lena/`.
  * @param {string} userRootId
  * @returns {Promise<{ layout: LenaLayoutIds, created: string[] }>}
  */
@@ -58,6 +67,8 @@ export async function ensureLenaTree(userRootId) {
 
   const rT = await ensureChildFolder(lenaRootId, LENA_SUB.templates);
   if (rT.created) created.push(`${LENA_ROOT_FOLDER}/${LENA_SUB.templates}`);
+  const rL = await ensureChildFolder(lenaRootId, LENA_SUB.library);
+  if (rL.created) created.push(`${LENA_ROOT_FOLDER}/${LENA_SUB.library}`);
   const rC = await ensureChildFolder(lenaRootId, LENA_SUB.context);
   if (rC.created) created.push(`${LENA_ROOT_FOLDER}/${LENA_SUB.context}`);
   const rN = await ensureChildFolder(lenaRootId, LENA_SUB.tenders);
@@ -68,6 +79,7 @@ export async function ensureLenaTree(userRootId) {
       userRootId,
       lenaRootId,
       templatesId: rT.id,
+      libraryId: rL.id,
       contextId: rC.id,
       tendersId: rN.id,
     },
@@ -78,16 +90,32 @@ export async function ensureLenaTree(userRootId) {
 /**
  * @param {string} userRootId
  * @param {string} tenderId
+ * @param {{ year?: string }} [opts] — если `year` задан (2026), путь: `tenders/2026/<tenderId>/…` (как в вашей структуре по годам)
  */
-export async function ensureTenderTree(userRootId, tenderId) {
+export async function ensureTenderTree(userRootId, tenderId, opts) {
+  const year = opts?.year ? normalizeTenderYear(opts.year) : undefined;
   const { layout, created } = await ensureLenaTree(userRootId);
   const tendersId = layout.tendersId;
   if (!tendersId) {
     throw new Error("Не удалось получить папку tenders");
   }
+
+  let parentForTender = tendersId;
+  if (year) {
+    const ry = await ensureChildFolder(tendersId, year);
+    if (ry.created) created.push(`${LENA_ROOT_FOLDER}/${LENA_SUB.tenders}/${year}`);
+    parentForTender = ry.id;
+  }
+
   const tName = tenderFolderName(tenderId);
-  const r0 = await ensureChildFolder(tendersId, tName);
-  if (r0.created) created.push(`${LENA_ROOT_FOLDER}/${LENA_SUB.tenders}/${tName}`);
+  const r0 = await ensureChildFolder(parentForTender, tName);
+  if (r0.created) {
+    created.push(
+      year
+        ? `${LENA_ROOT_FOLDER}/${LENA_SUB.tenders}/${year}/${tName}`
+        : `${LENA_ROOT_FOLDER}/${LENA_SUB.tenders}/${tName}`,
+    );
+  }
   const tenderRoot = r0.id;
 
   const rIn = await ensureChildFolder(tenderRoot, TENDER_SUB.inputs);
@@ -96,15 +124,22 @@ export async function ensureTenderTree(userRootId, tenderId) {
   if (rDr.created) created.push(`tender:${tName}/${TENDER_SUB.drafts}`);
   const rEx = await ensureChildFolder(tenderRoot, TENDER_SUB.exports);
   if (rEx.created) created.push(`tender:${tName}/${TENDER_SUB.exports}`);
+  const rAt = await ensureChildFolder(tenderRoot, TENDER_SUB.attachments);
+  if (rAt.created) created.push(`tender:${tName}/${TENDER_SUB.attachments}`);
+  const rNo = await ensureChildFolder(tenderRoot, TENDER_SUB.notes);
+  if (rNo.created) created.push(`tender:${tName}/${TENDER_SUB.notes}`);
 
   return {
     layout,
     tender: {
       tenderId,
+      year: year ?? null,
       folderId: tenderRoot,
       inputsId: rIn.id,
       draftsId: rDr.id,
       exportsId: rEx.id,
+      attachmentsId: rAt.id,
+      notesId: rNo.id,
     },
     created,
   };
@@ -120,6 +155,18 @@ export async function listTemplateFiles(userRootId) {
   }
   const files = await listChildren(templatesId);
   return { templatesFolderId: templatesId, files };
+}
+
+/**
+ * @param {string} userRootId
+ */
+export async function listLibraryFiles(userRootId) {
+  const { libraryId } = await resolveLayoutIds(userRootId);
+  if (!libraryId) {
+    return { libraryFolderId: null, files: [] };
+  }
+  const files = await listChildren(libraryId);
+  return { libraryFolderId: libraryId, files };
 }
 
 /**
@@ -177,25 +224,27 @@ export async function pullContextToLocal(userRootId, localDir) {
  * @param {string} userRootId
  * @param {string} templateFileId
  * @param {string} tenderId
- * @param {string} [newName]
+ * @param {{ year?: string, newName?: string }} [opts]
  */
-export async function copyTemplateToTenderDrafts(userRootId, templateFileId, tenderId, newName) {
-  const { tender } = await ensureTenderTree(userRootId, tenderId);
+export async function copyTemplateToTenderDrafts(userRootId, templateFileId, tenderId, opts) {
+  const { tender } = await ensureTenderTree(userRootId, tenderId, { year: opts?.year });
   const { files } = await listTemplateFiles(userRootId);
   const tpl = files.find((x) => x.id === templateFileId);
-  const name = newName?.trim() || (tpl ? `Копия ${tpl.name}` : `Копия_${templateFileId}`);
+  const name =
+    opts?.newName?.trim() || (tpl ? `Копия ${tpl.name}` : `Копия_${templateFileId}`);
   const copied = await copyFileToFolder(templateFileId, tender.draftsId, name);
   return { tender, copied };
 }
 
 /**
- * Снимок для агента «Лена»: id папок, шаблоны, контекст, при необходимости дерево тендера.
  * @param {string} userRootId
  * @param {string} [tenderId]
+ * @param {string} [tenderYear] — четыре цифры, вместе с tenderId задаёт путь `tenders/<год>/…`
  */
-export async function buildAgentDriveBundle(userRootId, tenderId) {
+export async function buildAgentDriveBundle(userRootId, tenderId, tenderYear) {
   const layout = await resolveLayoutIds(userRootId);
   const templates = await listTemplateFiles(userRootId);
+  const library = await listLibraryFiles(userRootId);
   const context = await listContextFiles(userRootId);
 
   /** @type {Record<string, unknown>} */
@@ -204,10 +253,18 @@ export async function buildAgentDriveBundle(userRootId, tenderId) {
     lena: {
       rootFolderId: layout.lenaRootId,
       templatesFolderId: layout.templatesId,
+      libraryFolderId: layout.libraryId,
       contextFolderId: layout.contextId,
       tendersFolderId: layout.tendersId,
     },
     templates: templates.files.map((f) => ({
+      id: f.id,
+      name: f.name,
+      mimeType: f.mimeType,
+      webViewLink: f.webViewLink,
+      modifiedTime: f.modifiedTime,
+    })),
+    libraryFiles: library.files.map((f) => ({
       id: f.id,
       name: f.name,
       mimeType: f.mimeType,
@@ -224,13 +281,17 @@ export async function buildAgentDriveBundle(userRootId, tenderId) {
   };
 
   if (tenderId?.trim()) {
-    const { tender } = await ensureTenderTree(userRootId, tenderId);
+    const year = tenderYear?.trim() ? normalizeTenderYear(tenderYear) : undefined;
+    const { tender } = await ensureTenderTree(userRootId, tenderId, { year });
     bundle.tender = {
       tenderId: tender.tenderId,
+      year: tender.year,
       rootFolderId: tender.folderId,
       inputsFolderId: tender.inputsId,
       draftsFolderId: tender.draftsId,
       exportsFolderId: tender.exportsId,
+      attachmentsFolderId: tender.attachmentsId,
+      notesFolderId: tender.notesId,
     };
   }
 

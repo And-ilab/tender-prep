@@ -14,20 +14,36 @@
 ```text
 <ваша корневая папка>/
   _lena/
-    templates/     ← шаблоны (Google Docs/Sheets, PDF, DOCX — что положите)
-    context/       ← общий контекст: прошлые заявки, глоссарий, политики, заметки
+    templates/     ← шаблоны заявок (копируете в тендер через template-copy)
+    library/       ← справочники, регламенты, выдержки (не обязательно «шаблон на копирование»)
+    context/       ← общий контекст между тендерами: стиль, глоссарий, фрагменты прошлых ответов
     tenders/
-      <tender_id>/   ← имя папки = безопасная версия вашего tender_id
-        inputs/      ← комплект документов закупки (загрузка сюда)
-        drafts/      ← черновики ответа (копии шаблонов, правки)
-        exports/     ← matrix.json, snapshot.json и т.д.
+      <tender_id>/                    ← если команда без года
+        inputs/
+        drafts/
+        exports/
+        attachments/                 ← доказательства, приложения к матрице
+        notes/                       ← разъяснения, переписка, короткие заметки
+      <ГГГГ>/                        ← опционально: как ваши папки 2024, 2025, 2026
+        <tender_id>/
+          inputs/
+          drafts/
+          exports/
+          attachments/
+          notes/
 ```
 
-**Шаблоны:** храните в `_lena/templates`. Лена смотрит список через `templates-list` или полный снимок `agent-bundle`.
+**Год в пути:** если вызываете `workspace-tender <root> <tenderId> 2026`, папка тендера будет **`_lena/tenders/2026/<tender_id>/…`** (рядом с вашей привычкой вести закупки по годам). Без третьего аргумента год **не** добавляется: **`_lena/tenders/<tender_id>/…`** (как раньше).
 
-**Контекст:** всё, что должно «помнить» модель между тендерами, кладите в `_lena/context`. Лена получает список (`context-list`) или локальную выгрузку (`context-pull` → `.txt` для Google Docs, `.csv` для Sheets, скачивание бинарников).
+Ваши уже существующие папки вроде **«ГС Ритейл» → 2026** можно **не трогать**: `_lena` — отдельное служебное дерево внутри той корневой папки, которую вы указали в `workspace-ensure` (это может быть сама «ГС Ритейл» или родитель «Подачи на тендер» — как решите).
 
-**Тендер:** команда `workspace-tender` создаёт при необходимости дерево `tenders/<tender_id>/{inputs,drafts,exports}`. Копия шаблона в черновики: `template-copy`.
+**Шаблоны:** `_lena/templates` — `templates-list`, `agent-bundle`.
+
+**Справочники:** `_lena/library` — `library-list`, `agent-bundle` (поле `libraryFiles`).
+
+**Контекст:** `_lena/context` — `context-list`, `context-pull`.
+
+**Тендер:** `workspace-tender` (+ опционально год), внутри — `inputs`, `drafts`, `exports`, `attachments`, `notes`. Копия шаблона: `template-copy` (см. справку `drive` — опционально год и имя файла).
 
 ## Настройка доступа (сервисный аккаунт)
 
@@ -49,15 +65,16 @@ cd tender-prep
 
 | Команда | Назначение |
 |---------|------------|
-| `drive workspace-ensure <root>` | Создать `_lena/{templates,context,tenders}` при отсутствии |
+| `drive workspace-ensure <root>` | Создать `_lena/{templates,library,context,tenders}` при отсутствии |
 | `drive workspace-layout <root>` | Показать id папок (без создания) |
-| `drive workspace-tender <root> <tenderId>` | Папка тендера + `inputs` / `drafts` / `exports` |
-| `drive templates-list <root>` | Список файлов в `_lena/templates` |
-| `drive context-list <root>` | Список файлов в `_lena/context` |
-| `drive context-pull <root> <локальнаяПапка>` | Выгрузить контекст локально для промпта |
-| `drive template-copy <root> <idШаблона> <tenderId> [имя]` | Копия файла (в т.ч. Google Doc) в `drafts` |
-| `drive item-rename <id> <новоеИмя>` | Переименовать папку или файл |
-| `drive agent-bundle <root> [tenderId]` | Один JSON: id папок, шаблоны, контекст (+ дерево тендера, с созданием папок при необходимости) |
+| `drive workspace-tender <root> <tenderId> [ГГГГ]` | Папка тендера + `inputs` / `drafts` / `exports` / `attachments` / `notes`; при годе — `tenders/<ГГГГ>/<id>/` |
+| `drive templates-list <root>` | Список в `_lena/templates` |
+| `drive library-list <root>` | Список в `_lena/library` |
+| `drive context-list <root>` | Список в `_lena/context` |
+| `drive context-pull <root> <локальнаяПапка>` | Выгрузить контекст локально |
+| `drive template-copy <root> <id> <tenderId> [ГГГГ] [имя]` | Копия в `drafts`; опционально год и новое имя |
+| `drive item-rename <id> <новоеИмя>` | Переименовать файл или папку |
+| `drive agent-bundle <root> [tenderId] [ГГГГ]` | JSON: папки, шаблоны, library, контекст, тендер |
 
 Низкоуровневые `list`, `meta`, `download`, `upload` сохраняются для произвольных путей.
 
@@ -66,8 +83,8 @@ cd tender-prep
 ```powershell
 $env:GOOGLE_DRIVE_CREDENTIALS = "C:\secrets\lena-drive.json"
 node src/cli.js drive workspace-ensure "https://drive.google.com/drive/folders/ROOT_ID"
-node src/cli.js drive workspace-tender "ROOT_ID" "zakupka-2026-042"
-node src/cli.js drive agent-bundle "ROOT_ID" "zakupka-2026-042"
+node src/cli.js drive workspace-tender "ROOT_ID" "zakupka-2026-042" 2026
+node src/cli.js drive agent-bundle "ROOT_ID" "zakupka-2026-042" 2026
 ```
 
 `<root>` везде — **id или URL** той самой **корневой** папки проекта (не обязательно `_lena`).
