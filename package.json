@@ -3,15 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Модуль «Лена»: тендерный контракт, валидация, матрица; опционально Google Drive",
+  "description": "Модуль «Лена»: тендерный контракт, валидация, матрица; Google Drive через встроенный fetch (без googleapis)",
   "scripts": {
     "lena": "node src/cli.js",
     "telegram:smoke": "node src/telegram/smoke-poll.mjs"
   },
   "engines": {
     "node": ">=20"
-  },
-  "dependencies": {
-    "googleapis": "^149.0.0"
   }
 }

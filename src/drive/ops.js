@@ -1,57 +1,42 @@
 import { createWriteStream } from "node:fs";
-import { pipeline } from "node:stream/promises";
 import { createReadStream } from "node:fs";
 import { basename } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { assertCredentialsFile } from "./config.js";
-
-/**
- * @returns {Promise<import("googleapis").drive_v3.Drive>}
- */
-export async function getDrive() {
-  let google;
-  try {
-    ({ google } = await import("googleapis"));
-  } catch {
-    throw new Error("Пакет googleapis не найден. Выполните в корне репозитория: npm install");
-  }
-  const keyFile = assertCredentialsFile();
-  const auth = new google.auth.GoogleAuth({
-    keyFile,
-    scopes: ["https://www.googleapis.com/auth/drive"],
-  });
-  const client = await auth.getClient();
-  return google.drive({ version: "v3", auth: client });
-}
-
-const driveOpts = { supportsAllDrives: true, includeItemsFromAllDrives: true };
+import {
+  driveDownloadMedia,
+  driveExport,
+  driveFilesCopy,
+  driveFilesCreate,
+  driveFilesGetMeta,
+  driveFilesList,
+  driveFilesUpdate,
+  driveMultipartUpload,
+} from "./driveHttp.js";
 
 /**
  * @param {string} folderId
  */
 export async function listChildren(folderId) {
-  const drive = await getDrive();
+  assertCredentialsFile();
   const q = `'${folderId}' in parents and trashed = false`;
-  const res = await drive.files.list({
+  const data = await driveFilesList(
     q,
-    fields: "files(id, name, mimeType, modifiedTime, size, webViewLink)",
-    orderBy: "folder,name",
-    pageSize: 200,
-    ...driveOpts,
-  });
-  return res.data.files ?? [];
+    "files(id, name, mimeType, modifiedTime, size, webViewLink)",
+    "folder,name",
+  );
+  return data.files ?? [];
 }
 
 /**
  * @param {string} fileId
  */
 export async function getMetadata(fileId) {
-  const drive = await getDrive();
-  const res = await drive.files.get({
+  assertCredentialsFile();
+  return driveFilesGetMeta(
     fileId,
-    fields: "id, name, mimeType, size, modifiedTime, webViewLink, parents, driveId",
-    ...driveOpts,
-  });
-  return res.data;
+    "id, name, mimeType, size, modifiedTime, webViewLink, parents, driveId",
+  );
 }
 
 /**
@@ -59,84 +44,50 @@ export async function getMetadata(fileId) {
  * @param {string} destPath
  */
 export async function downloadFile(fileId, destPath) {
-  const drive = await getDrive();
-  const res = await drive.files.get(
-    { fileId, alt: "media", ...driveOpts },
-    { responseType: "stream" },
-  );
-  await pipeline(res.data, createWriteStream(destPath));
+  assertCredentialsFile();
+  await driveDownloadMedia(fileId, createWriteStream(destPath));
 }
 
 /**
- * Загрузка нового файла в папку (или корень общего диска с правами).
  * @param {string} folderId
  * @param {string} localPath
  * @param {string} [destName]
  */
 export async function uploadFile(folderId, localPath, destName) {
-  const drive = await getDrive();
+  assertCredentialsFile();
   const name = destName?.trim() || basename(localPath);
-  const res = await drive.files.create({
-    requestBody: {
-      name,
-      parents: [folderId],
-    },
-    media: {
-      body: createReadStream(localPath),
-    },
-    fields: "id, name, webViewLink, mimeType",
-    ...driveOpts,
-  });
-  return res.data;
+  return driveMultipartUpload(folderId, localPath, name);
 }
 
 /**
- * Переименовать файл или папку.
  * @param {string} fileId
  * @param {string} newName
  */
 export async function updateFileName(fileId, newName) {
-  const drive = await getDrive();
-  const res = await drive.files.update({
-    fileId,
-    requestBody: { name: newName },
-    fields: "id, name, webViewLink, mimeType",
-    supportsAllDrives: true,
-  });
-  return res.data;
+  assertCredentialsFile();
+  return driveFilesUpdate(fileId, { name: newName }, "id, name, webViewLink, mimeType");
 }
 
 /**
- * Копировать файл (в т.ч. Google Doc как шаблон) в папку.
  * @param {string} fileId
  * @param {string} destFolderId
  * @param {string} newName
  */
 export async function copyFileToFolder(fileId, destFolderId, newName) {
-  const drive = await getDrive();
-  const res = await drive.files.copy({
+  assertCredentialsFile();
+  return driveFilesCopy(
     fileId,
-    requestBody: {
-      name: newName,
-      parents: [destFolderId],
-    },
-    fields: "id, name, webViewLink, mimeType",
-    supportsAllDrives: true,
-  });
-  return res.data;
+    { name: newName, parents: [destFolderId] },
+    "id, name, webViewLink, mimeType",
+  );
 }
 
 /**
- * Экспорт Google Docs/Sheets в файл на диск.
  * @param {string} fileId
  * @param {string} exportMime
  * @param {string} destPath
  */
 export async function exportGoogleFile(fileId, exportMime, destPath) {
-  const drive = await getDrive();
-  const res = await drive.files.export(
-    { fileId, mimeType: exportMime },
-    { responseType: "stream" },
-  );
-  await pipeline(res.data, createWriteStream(destPath));
+  assertCredentialsFile();
+  await driveExport(fileId, exportMime, createWriteStream(destPath));
 }

@@ -15,7 +15,7 @@ import { downloadFile, getMetadata, listChildren, uploadFile } from "./ops.js";
 function usage() {
   console.error(
     [
-      "lena drive — Google Drive для «Лены» (нужен npm install и JSON сервисного аккаунта)",
+      "lena drive — Google Drive для «Лены» (Node 20+, JSON сервисного аккаунта, без npm-зависимостей)",
       "",
       "Низкоуровневые:",
       "  drive list <folderUrlOrId>",

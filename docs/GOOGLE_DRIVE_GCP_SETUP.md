@@ -113,13 +113,9 @@
 
 ---
 
-## Шаг 10. Установить зависимости и переменную окружения
+## Шаг 10. Переменная окружения с путём к ключу
 
-В каталоге репозитория `tender-prep`:
-
-```bash
-npm install
-```
+Отдельный **`npm install` для Drive не нужен** — в репозитории вызовы Drive API идут через встроенный `fetch` и JWT (см. `src/drive/authToken.js`).
 
 В PowerShell (пример пути под Windows):
 
@@ -153,10 +149,10 @@ node src/cli.js drive agent-bundle "ВАШ_ID_ПАПКИ"
 ## Что происходит «под капотом» технически
 
 1. Node загружает JSON ключа.
-2. Библиотека `google-auth-library` (в составе `googleapis`) запрашивает у Google **короткоживущий access token** по OAuth2 для сервисного аккаунта.
-3. Запросы идут по HTTPS к **Google Drive API** (REST), например создание папки, список файлов — это не «облачная виртуалка» в GCP, а **прямые HTTP-вызовы к сервису Drive**.
+2. Скрипт строит **JWT** (подпись `RS256` через `node:crypto`), обменивает его на **access token** у `https://oauth2.googleapis.com/token`.
+3. Запросы идут по **HTTPS** к **Google Drive API** (`https://www.googleapis.com/drive/v3/...`) с заголовком `Authorization: Bearer …`.
 
-Отдельно поднимать Cloud Run / VM **не обязательно** для локального CLI.
+Отдельно поднимать Cloud Run / VM **не обязательно** для локального CLI. Пакет **`googleapis` не используется** — меньше зависимостей и нет необходимости в `npm install` ради Диска.
 
 ---
 
@@ -166,7 +162,7 @@ node src/cli.js drive agent-bundle "ВАШ_ID_ПАПКИ"
 |--------|----------------|
 | `403` / Access not configured | Drive API не включён (шаг 4) или папка не расшарена на `client_email` (шаг 9). |
 | `404` на файлах | Файл не в папке, доступной аккаунту; неверный `fileId`. |
-| `npm install` и TLS | Корпоративный прокси/сертификат; см. [GOOGLE_DRIVE.md](GOOGLE_DRIVE.md). |
+| `npm install` и TLS | Актуально только если снова появятся npm-зависимости. Для `drive` они не нужны. |
 
 ---
 

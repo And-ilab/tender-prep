@@ -37,12 +37,13 @@
 
 ## Установка
 
+Для команд **Google Drive** отдельные npm-пакеты **не нужны** (используются `fetch` и JWT в `src/drive/`).
+
 ```bash
 cd tender-prep
-npm install
 ```
 
-Если `npm install` падает с **UNABLE_TO_VERIFY_LEAF_SIGNATURE**, настройте доверенный CA для Node (например `NODE_OPTIONS=--use-openssl-ca`) или политику registry по ИБ.
+`npm install` требуется только если в проекте снова появятся зависимости в `package.json`. Раньше использовался пакет `googleapis`; он **убран**, в том числе чтобы обойти проблемы корпоративного TLS при `npm install`.
 
 ## Команды CLI (сводка)
 

@@ -30,15 +30,16 @@ node src/cli.js snapshot examples/parser-result.sample.json out/snapshot.json
 node src/cli.js matrix examples/parser-result.sample.json out/matrix.json
 ```
 
-Команды **validate / snapshot / matrix** не тянут внешние пакеты. Для **Google Drive** выполните `npm install` (пакет `googleapis`), задайте `GOOGLE_DRIVE_CREDENTIALS` и см. [docs/GOOGLE_DRIVE.md](docs/GOOGLE_DRIVE.md):
+Команды **validate / snapshot / matrix** не тянут внешние пакеты. **Google Drive** в CLI работает через встроенный **`fetch`** и JWT (отдельный `npm install` не нужен): задайте `GOOGLE_DRIVE_CREDENTIALS` и см. [docs/GOOGLE_DRIVE.md](docs/GOOGLE_DRIVE.md):
 
 ```bash
-node src/cli.js drive list "<url_или_id_папки>"
+node src/cli.js drive workspace-ensure "<url_или_id_корневой_папки>"
 ```
 
 Либо: `npm run lena -- validate-input …` (скрипт вызывает тот же `node src/cli.js`).
 
-Исходники: `src/` — валидация JSON, снимок, матрица; `src/drive/` — Drive API. Точка для Windmill/parserit остаётся внешней.
+Исходники: `src/` — валидация JSON, снимок, матрица; `src/drive/` — Drive API по HTTPS (`authToken.js`, `driveHttp.js`). Точка для Windmill/parserit остаётся внешней.
+
 ## Структура репозитория
 
 - `docs/` — человекочитаемый контракт и контекст (в т.ч. для ИИ-агентов).
