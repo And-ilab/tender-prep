@@ -10,8 +10,9 @@
 | [docs/PARSERIT_INTEGRATION.md](docs/PARSERIT_INTEGRATION.md) | Интеграция с parserit: пути скриптов/флоу в Windmill, входы/выходы, типовой порядок вызовов |
 | [docs/WINDOWS_GIT.md](docs/WINDOWS_GIT.md) | Работа с Git на Windows для этого репозитория и смежных проектов |
 | [docs/GOOGLE_DRIVE.md](docs/GOOGLE_DRIVE.md) | Google Drive: сервисный аккаунт, команды CLI `drive` |
+| [docs/TELEGRAM.md](docs/TELEGRAM.md) | Тестовая группа в Telegram и смоук-бот (Bot API) |
 
-Перед изменениями в коде или промптах агентов имеет смысл начинать с **PRODUCT_CONTEXT**, затем сверяться с контрактом **parserit**, при работе с Диском — с **GOOGLE_DRIVE**, с Git на Windows — **WINDOWS_GIT**.
+Перед изменениями в коде или промптах агентов имеет смысл начинать с **PRODUCT_CONTEXT**, затем сверяться с контрактом **parserit**, при работе с Диском — с **GOOGLE_DRIVE**, для тестов в мессенджере — **TELEGRAM**, с Git на Windows — **WINDOWS_GIT**.
 
 ## Кратко о «Лене»
 

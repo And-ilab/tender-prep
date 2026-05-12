@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Модуль «Лена»: тендерный контракт, валидация, матрица; опционально Google Drive",
   "scripts": {
-    "lena": "node src/cli.js"
+    "lena": "node src/cli.js",
+    "telegram:smoke": "node src/telegram/smoke-poll.mjs"
   },
   "engines": {
     "node": ">=20"
