@@ -1,51 +1,87 @@
-# Google Drive для tender-prep / «Лена»
+# Google Drive и «Лена»: папки, шаблоны, контекст
 
-Интеграция нужна, чтобы хранить комплекты документов закупки на Диске, скачивать их локально под парсинг или загружать артефакты (например матрицу соответствия).
+**Пошаговая настройка Google Cloud, Drive API и JSON-ключа:** отдельный файл [GOOGLE_DRIVE_GCP_SETUP.md](GOOGLE_DRIVE_GCP_SETUP.md).
 
-## Что сделано в коде
+Цель — чтобы **Лена** (агент или оператор по сценарию) работала с **одной согласованной структурой** на Google Drive: сама **создавала и переименовывала** папки под тендеры, **видела шаблоны** документов, **подтягивала ранее положенные файлы** как общий контекст.
 
-CLI: `node src/cli.js drive …` (после `npm install`, см. ниже).
+## Корень и служебная папка `_lena`
 
-| Команда | Действие |
-|---------|----------|
-| `drive list <папка>` | Список файлов в папке (id или URL вида `…/folders/…`) |
-| `drive meta <файл\|папка>` | Метаданные в JSON |
-| `drive download <файл> <путь>` | Скачать содержимое файла |
-| `drive upload <папка> <локальный_файл> [имя]` | Загрузить файл в указанную папку |
+1. Вы создаёте на Диске **одну корневую папку** под проект (например «Тендеры ACME») и **расшариваете** её сервисному аккаунту с правом **Редактор** (см. ниже про ключ).
+2. Внутри этой папки код создаёт каталог **`_lena/`** (префикс снижает риск пересечения с вашими уже существующими именами).
 
-Переменная окружения **`GOOGLE_DRIVE_CREDENTIALS`** (или стандартная **`GOOGLE_APPLICATION_CREDENTIALS`**) — **абсолютный или относительный путь к JSON ключу сервисного аккаунта** Google Cloud. Файл с ключом в Git не коммитить.
+Структура после команды `workspace-ensure`:
 
-## Настройка в Google Cloud
+```text
+<ваша корневая папка>/
+  _lena/
+    templates/     ← шаблоны (Google Docs/Sheets, PDF, DOCX — что положите)
+    context/       ← общий контекст: прошлые заявки, глоссарий, политики, заметки
+    tenders/
+      <tender_id>/   ← имя папки = безопасная версия вашего tender_id
+        inputs/      ← комплект документов закупки (загрузка сюда)
+        drafts/      ← черновики ответа (копии шаблонов, правки)
+        exports/     ← matrix.json, snapshot.json и т.д.
+```
 
-1. Создайте проект в [Google Cloud Console](https://console.cloud.google.com/).
-2. **APIs & Services → Library** — включите **Google Drive API**.
-3. **IAM & Admin → Service Accounts** — создайте сервисный аккаунт, выпустите ключ JSON, сохраните файл локально (например `secrets/lena-drive.json`).
-4. В **Google Drive** создайте папку под тендеры и **поделитесь** ею с email сервисного аккаунта (поле `client_email` в JSON) с правом **Редактор** (или «Читатель», если нужен только `drive list` / `download` — тогда в коде можно сузить scope; сейчас используется полный `https://www.googleapis.com/auth/drive` для совместимости с общими дисками и загрузкой).
+**Шаблоны:** храните в `_lena/templates`. Лена смотрит список через `templates-list` или полный снимок `agent-bundle`.
 
-Без шага «поделиться папкой» сервисный аккаунт **не увидит** личные файлы вашего пользователя.
+**Контекст:** всё, что должно «помнить» модель между тендерами, кладите в `_lena/context`. Лена получает список (`context-list`) или локальную выгрузку (`context-pull` → `.txt` для Google Docs, `.csv` для Sheets, скачивание бинарников).
 
-## Установка зависимости
+**Тендер:** команда `workspace-tender` создаёт при необходимости дерево `tenders/<tender_id>/{inputs,drafts,exports}`. Копия шаблона в черновики: `template-copy`.
+
+## Настройка доступа (сервисный аккаунт)
+
+Полная пошаговая инструкция (проект, биллинг, включение API, ключ, шаринг папки, `GOOGLE_DRIVE_CREDENTIALS`, проверка `node`): **[GOOGLE_DRIVE_GCP_SETUP.md](GOOGLE_DRIVE_GCP_SETUP.md)**.
+
+Кратко: JSON-ключ сервисного аккаунта + переменная **`GOOGLE_DRIVE_CREDENTIALS`** (или **`GOOGLE_APPLICATION_CREDENTIALS`**) + папка на Диске расшарена на **`client_email`** из JSON с ролью **Редактор**.
+
+## Установка
 
 ```bash
 cd tender-prep
 npm install
 ```
 
-Если `npm install` падает с **UNABLE_TO_VERIFY_LEAF_SIGNATURE** (корпоративный TLS), настройте доверенный CA для Node (например `NODE_OPTIONS=--use-openssl-ca` при наличии системных корней) или зеркало registry по политике ИБ — без установки `googleapis` команды `drive` не запустятся.
+Если `npm install` падает с **UNABLE_TO_VERIFY_LEAF_SIGNATURE**, настройте доверенный CA для Node (например `NODE_OPTIONS=--use-openssl-ca`) или политику registry по ИБ.
 
-Базовые команды `validate-input` / `matrix` по-прежнему работают **без** `node_modules`; для `drive` нужен установленный пакет `googleapis`.
+## Команды CLI (сводка)
 
-## Пример (PowerShell)
+| Команда | Назначение |
+|---------|------------|
+| `drive workspace-ensure <root>` | Создать `_lena/{templates,context,tenders}` при отсутствии |
+| `drive workspace-layout <root>` | Показать id папок (без создания) |
+| `drive workspace-tender <root> <tenderId>` | Папка тендера + `inputs` / `drafts` / `exports` |
+| `drive templates-list <root>` | Список файлов в `_lena/templates` |
+| `drive context-list <root>` | Список файлов в `_lena/context` |
+| `drive context-pull <root> <локальнаяПапка>` | Выгрузить контекст локально для промпта |
+| `drive template-copy <root> <idШаблона> <tenderId> [имя]` | Копия файла (в т.ч. Google Doc) в `drafts` |
+| `drive item-rename <id> <новоеИмя>` | Переименовать папку или файл |
+| `drive agent-bundle <root> [tenderId]` | Один JSON: id папок, шаблоны, контекст (+ дерево тендера, с созданием папок при необходимости) |
+
+Низкоуровневые `list`, `meta`, `download`, `upload` сохраняются для произвольных путей.
+
+Пример (PowerShell):
 
 ```powershell
-$env:GOOGLE_DRIVE_CREDENTIALS = "C:\path\to\service-account.json"
-node src/cli.js drive list "https://drive.google.com/drive/folders/YOUR_FOLDER_ID"
+$env:GOOGLE_DRIVE_CREDENTIALS = "C:\secrets\lena-drive.json"
+node src/cli.js drive workspace-ensure "https://drive.google.com/drive/folders/ROOT_ID"
+node src/cli.js drive workspace-tender "ROOT_ID" "zakupka-2026-042"
+node src/cli.js drive agent-bundle "ROOT_ID" "zakupka-2026-042"
 ```
+
+`<root>` везде — **id или URL** той самой **корневой** папки проекта (не обязательно `_lena`).
+
+## Как этим пользоваться в сценарии «Лена»
+
+1. Один раз: `workspace-ensure`, положить шаблоны и контекстные файлы в нужные подпапки.
+2. На новый тендер: `workspace-tender` (или сразу `agent-bundle` с `tenderId` — дерево создастся само).
+3. Перед генерацией ответа агенту: `agent-bundle` или `context-pull` + `templates-list`, чтобы в промпт попали **имена, ссылки и типы** файлов.
+4. Черновик: `template-copy` копирует шаблон в `drafts`; дальше правки — в Google Docs вручную или через другие интеграции.
 
 ## Общие диски (Shared Drives)
 
-Вызовы API идут с `supportsAllDrives: true` и `includeItemsFromAllDrives: true`. Папка должна быть доступна сервисному аккаунту так же, как и на «Моём диске».
+Запросы к API идут с `supportsAllDrives: true`. Корневая папка может жить на общем диске, если сервисный аккаунт добавлен в участники с нужной ролью.
 
-## Связка с `document_urls` во входе закупки
+## Связка с репозиторием
 
-В [PARSERIT_INTEGRATION.md](PARSERIT_INTEGRATION.md) поле `document_urls` допускает строки-URL. Прямые ссылки вида `https://drive.google.com/...` для **публичных** файлов иногда открываются по HTTP; для закрытых документов надёжнее **скачивать через CLI** по `fileId` под учётом сервисного аккаунта и подставлять локальные пути или подписанные URL в свой пайплайн — это уже сценарий оркестратора (Windmill и т.д.), не обязательно самого `lena drive`.
+Локальные команды `validate-input`, `matrix` и т.д. не зависят от Диска. Типичный поток: **скачать** комплект в `inputs/` (через `upload` или вручную в UI), затем локально прогнать парсинг и положить `exports/matrix.json` на Диск через `upload`.

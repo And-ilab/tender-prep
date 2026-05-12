@@ -89,3 +89,54 @@ export async function uploadFile(folderId, localPath, destName) {
   });
   return res.data;
 }
+
+/**
+ * Переименовать файл или папку.
+ * @param {string} fileId
+ * @param {string} newName
+ */
+export async function updateFileName(fileId, newName) {
+  const drive = await getDrive();
+  const res = await drive.files.update({
+    fileId,
+    requestBody: { name: newName },
+    fields: "id, name, webViewLink, mimeType",
+    supportsAllDrives: true,
+  });
+  return res.data;
+}
+
+/**
+ * Копировать файл (в т.ч. Google Doc как шаблон) в папку.
+ * @param {string} fileId
+ * @param {string} destFolderId
+ * @param {string} newName
+ */
+export async function copyFileToFolder(fileId, destFolderId, newName) {
+  const drive = await getDrive();
+  const res = await drive.files.copy({
+    fileId,
+    requestBody: {
+      name: newName,
+      parents: [destFolderId],
+    },
+    fields: "id, name, webViewLink, mimeType",
+    supportsAllDrives: true,
+  });
+  return res.data;
+}
+
+/**
+ * Экспорт Google Docs/Sheets в файл на диск.
+ * @param {string} fileId
+ * @param {string} exportMime
+ * @param {string} destPath
+ */
+export async function exportGoogleFile(fileId, exportMime, destPath) {
+  const drive = await getDrive();
+  const res = await drive.files.export(
+    { fileId, mimeType: exportMime },
+    { responseType: "stream" },
+  );
+  await pipeline(res.data, createWriteStream(destPath));
+}
