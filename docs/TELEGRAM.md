@@ -6,7 +6,7 @@
 
 1. Создайте группу в Telegram (например «Lena tender-prep test»).
 2. Добавьте участников, которым нужен доступ к тесту.
-3. Закрепите в описании или закреплённом сообщении: **id корневой папки Google Drive**, правила именования `tender_id`, кто кладёт файлы в `_lena/context` и `_lena/templates`.
+3. Закрепите в описании или закреплённом сообщении: **id корневой папки Google Drive**, правила именования `tender_id`, кто кладёт файлы в `_lena/context` и `_lena/templates`, и при параллельных закупках в одном чате — **правило «Ответить»** на якорное сообщение по тендеру (см. раздел 4 в этом файле).
 
 ## 2. Бот (опционально, для API)
 
@@ -29,7 +29,88 @@ node src/telegram/smoke-poll.mjs
 
 Это проверяет только связку **Telegram Bot API ↔ ваш процесс**, без Google.
 
-## 4. Связка с Google Drive в тесте
+## 4. Бот «Лена» (Drive из чата)
+
+Скрипт `src/telegram/lena-bot.mjs` отвечает в группе на команды и читает ту же структуру `_lena/`, что и CLI (`workspace.js`).
+
+**Переменные окружения** (см. `examples/env.telegram.example`):
+
+| Переменная | Назначение |
+|------------|------------|
+| `TELEGRAM_BOT_TOKEN` | обязательно |
+| `LENA_DRIVE_ROOT` | id или URL корневой папки Drive (как для `drive workspace-ensure`) |
+| `GOOGLE_DRIVE_CREDENTIALS` | путь к JSON **сервисного аккаунта** с доступом к папке (**или** см. OAuth ниже) |
+| `GOOGLE_DRIVE_OAUTH_CLIENT` | для **личного** Gmail: путь к JSON OAuth-клиента (Desktop) из Google Cloud |
+| `GOOGLE_DRIVE_OAUTH_TOKEN` | для **личного** Gmail: путь к JSON с `refresh_token` после `node src/cli.js drive oauth-login` (см. [GOOGLE_DRIVE_OAUTH.md](GOOGLE_DRIVE_OAUTH.md)) |
+| `TELEGRAM_ALLOWED_CHAT_IDS` | опционально: список `chat_id` через запятую; **если не задано** — бот отвечает во всех чатах; **если задано** — все остальные чаты игнорируются без ответа (обновляйте список при смене чата); при старте бот пишет в консоль активный whitelist |
+| `LENA_DEFAULT_TENDER_YEAR` | опционально: год для `/bundle` (иначе текущий календарный) |
+| `LENA_EXTRA_CONTEXT_FOLDERS` | опционально: URL или id папок на Drive (через запятую) — подмешиваются в `/context` и в бандл; каждая папка расшарена на тот же SA |
+| `OPENAI_API_KEY` или `LENA_OPENAI_API_KEY` | опционально: для `/ask`, `/tenderask` и **`/archiveask`** (Chat Completions) |
+| `LENA_OPENAI_BASE_URL` | опционально: API совместимый с OpenAI (по умолчанию `https://api.openai.com/v1`) |
+| `LENA_OPENAI_MODEL` | опционально (по умолчанию `gpt-4o-mini`) |
+| `LENA_LLM_SYSTEM_PROMPT` | опционально: свой системный промпт вместо встроенного (содержательно см. [LENA_RULES.md](LENA_RULES.md), раздел «Краткий системный блок») |
+| `LENA_RAG_INDEX_DIR` | путь к папке индекса (`manifest.json` + `chunks.jsonl`) — для **`/archivesearch`** и **`/archiveask`** |
+| `LENA_EMBEDDING_BASE_URL` | как у `rag query`: **`POST …/embeddings`** (локально `http://127.0.0.1:8765/v1`) |
+| `LENA_EMBEDDING_API_KEY` | непустой Bearer; для локального CPU-сервера — например `sk-local` |
+| `LENA_EMBEDDING_MODEL` | та же модель, что при **`rag index`** (например `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`) |
+| `LENA_RAG_TOP_K` | опционально: число фрагментов по умолчанию (иначе 8), макс. 24 |
+| `LENA_ICETRADE_BOOT_MAX_FILES` | опционально: макс. число файлов за один bootstrap IceTrade→inputs (по умолчанию 30) |
+| `LENA_ICETRADE_FETCH_TIMEOUT_MS` | опционально: таймаут HTTP к карточке IceTrade и скачивания файла в мс (по умолчанию 25000) |
+
+**Команды в Telegram:** `/help`, `/product` (IceTrade, Drive, политика корпуса RAG — см. [PRODUCT_CONTEXT.md](PRODUCT_CONTEXT.md)), `/templates`, `/library`, `/orgdocs`, `/foundingdocs`, `/context`, `/bundle <tender_id> [ГГГГ|flat]`, `/ingest <tender_id> [ГГГГ|flat] <папка_Drive>`, `/ask …`, **`/archivesearch …`** (алиас `/searcharchive`), **`/archiveask …`** (алиас `/askarchive`), `/tenderask …`, `/newchat`.
+
+Дополнительно в **группе**, если сообщение **обращено к боту** (@username / Reply / mention): бот распознаёт ссылку IceTrade (`https://` или без) и выполняет **bootstrap**: создаёт папку тендера на Drive (`tender_id` = номер view на площадке), пробует скачать вложения в **`inputs`** и добавляет в **`notes`** файл с чеклистом того, что **запросить у менеджера**. Полный разбор PDF/OCR — через parserit/Windmill отдельно (см. [PARSERIT_INTEGRATION.md](PARSERIT_INTEGRATION.md)). То же из CLI: `node src/cli.js tenders icetrade-bootstrap <root> <url|id> [flat|ГГГГ]`.
+
+Тот же **IceTrade bootstrap** без Telegram:
+
+```bash
+node src/cli.js tenders icetrade-bootstrap <LENA_DRIVE_ROOT_или_id> "https://icetrade.by/tenders/all/view/1336119"
+```
+
+**Архив (RAG):** команды ищут по **локальному** индексу на машине, где запущен бот. Держите в отдельном окне **сервер эмбеддингов** (`scripts/local_openai_embeddings/server.py`), если `LENA_EMBEDDING_BASE_URL` указывает на `127.0.0.1`.
+
+**Нейросеть:** `/ask` — диалог с краткой памятью в рамках чата (до нескольких последних реплик). `/tenderask` — в модель передаётся усечённый JSON того же вида, что и у `/bundle`, плюс ваш вопрос (удобно спрашивать про структуру папок и ссылки). Ключ API не коммитьте; при утечке перевыпустите в кабинете провайдера.
+
+### Несколько тендеров в одной группе
+
+В одном чате часто идут **несколько закупок**. Чтобы Лена не смешивала контекст:
+
+1. Пользователь пишет в **ветке** нужного тендера: через **«Ответить»** на сообщение, с которым договорились работать для этой закупки (например на файл/ответ бота после `/bundle <tender_id>`, на реплику с вопросом по этому же тендеру, на закреп с `tender_id`).
+2. Лена в промптах настроена **напоминать** об этом и **не додумывать** тендер, если привязки нет — см. [LENA_RULES.md](LENA_RULES.md), раздел «Telegram: один чат, несколько тендеров».
+3. Надёжный вариант без привязки к ветке: **`/tenderask <tender_id> …`** — `tender_id` в команде задаёт закупку явно.
+4. Если в чате **указание без привязки** к тендеру и неясно, о какой закупке речь — Лена **не угадывает**: просит **`tender_id`** или **ссылку** на тендер/закупку (см. [LENA_RULES.md](LENA_RULES.md) §6a).
+
+**Опционально (бот):** задайте `LENA_TELEGRAM_GROUP_ASK_REQUIRE_REPLY=1` (см. таблицу переменных выше) — в группах и супергруппах команда **`/ask`** без поля «ответ на сообщение» **не вызывает** LLM: бот отвечает коротким отказом и ссылкой на правило. В **личке** с ботом ограничение не действует. Для `/tenderask` / `/bundle` / `/ingest` проверка не включена (там уже есть `tender_id` в тексте команды, кроме случаев, когда команда ошибочна — тогда сработает обычная справка по использованию).
+
+### Лог переписки с менеджерами на Drive
+
+Согласования и уточнения с менеджерами по **конкретному** тендеру (цена, НДС, условия, **подтверждение гипотез** по противоречивым требованиям заказчика к документам) нужно **дублировать в контекстном логе тендера** на Google Drive: один файл **`notes/telegram-managers-log.md`** внутри папки этого тендера (`notesFolderId` в `agent-bundle`). Правила для Лены — [LENA_RULES.md](LENA_RULES.md) §6e и §6f. Пока менеджер не закрыл запросы по файлам (справка банка и т.д.), Лена по **§6g** не обязана разгонять длинную генерацию пакета под эти вложения — сначала матрица и статусы.
+
+**Запуск** (из корня репозитория):
+
+```bash
+npm run lena:telegram
+```
+
+или `node src/telegram/lena-bot.mjs`. Остановка: `Ctrl+C`.
+
+**Windows:** в **cmd.exe** (`C:\...>`) нельзя использовать синтаксис PowerShell `$env:ИМЯ=...`. Комментарии в cmd — `rem`, не `#`. Задайте переменные так (без пробелов вокруг `=`, подставьте свои значения):
+
+```bat
+set TELEGRAM_BOT_TOKEN=...
+set LENA_DRIVE_ROOT=https://drive.google.com/drive/folders/...
+set GOOGLE_DRIVE_CREDENTIALS=C:\Users\...\key.json
+set OPENAI_API_KEY=sk-...
+set LENA_RAG_INDEX_DIR=C:\data\rag-index-2025-drive
+set LENA_EMBEDDING_BASE_URL=http://127.0.0.1:8765/v1
+set LENA_EMBEDDING_API_KEY=sk-local
+set LENA_EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+node src\telegram\lena-bot.mjs
+```
+
+В **PowerShell** то же самое: `$env:TELEGRAM_BOT_TOKEN="..."` и т.д. (одна строка на переменную; `#` там — комментарий только в конце строки после кода).
+
+## 5. Связка с Google Drive в тесте
 
 Рекомендуемый порядок **ручной** проверки:
 
@@ -38,9 +119,17 @@ node src/telegram/smoke-poll.mjs
 3. `node src/cli.js drive agent-bundle "<root>" "ваш-tender-id"` — вывод JSON **выложить в группу** как файл `.json` или в сниппет (если небольшой).
 4. В группе зафиксировать: ссылки `webViewLink` из JSON на шаблоны и контекст.
 
-Автоматическая отправка `agent-bundle` в Telegram из скрипта можно добавить позже (один `fetch` на `sendDocument` с `multipart/form-data`).
+Для автоматической отправки `agent-bundle` в чат используйте бота «Лена» (раздел 4) или выложите JSON вручную.
 
-## 5. Безопасность
+## 6. Нераспознанные / нетекстовые файлы в проекте (правило для Лены)
+
+**Контекст:** локальный RAG (`rag index`) индексирует только **`.txt`**, **`.md`**, **`.csv`**, **`.log`**. PDF, DOC, DOCX и прочие типы попадают в векторный поиск **только после** извлечения текста (например `scripts/corpus_extract_text`).
+
+**Правило поведения Лены:** если в проекте на Drive (или в переданном инвентаре) есть файлы **вне** этого текстового контура, Лена **должна явно сигнализировать**, что их содержимое **не** попало в текстовый/RAG-пайплайн до предобработки (без выдумывания содержимого).
+
+**Как именно сигнализировать** (отдельное сообщение, префикс в ответе, задача в чек-листе, реакция и т.д.) — **уточняется позже**; до этого достаточно явного предупреждения в тексте ответа.
+
+## 7. Безопасность
 
 - Тестовая группа не должна содержать боевые персональные данные и коммерческую тайну.
 - Токен бота = полный доступ к боту; при утечке — `/revoke` в BotFather и новый токен.

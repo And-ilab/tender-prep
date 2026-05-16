@@ -1,7 +1,11 @@
 node_modules/
+__pycache__/
+*.pyc
 dist/
 out/
 secrets/
 *.tsbuildinfo
 .env
 .env.*
+*-drive-oauth-token.json
+*-user-token.json

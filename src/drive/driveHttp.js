@@ -51,7 +51,7 @@ async function readJsonResponse(url, init) {
  * @param {string} fields
  * @param {string} [orderBy]
  */
-export async function driveFilesList(q, fields, orderBy) {
+export async function driveFilesList(q, fields, orderBy, pageToken) {
   const u = new URL(`${DRIVE_V3}/files`);
   u.searchParams.set("supportsAllDrives", "true");
   u.searchParams.set("includeItemsFromAllDrives", "true");
@@ -59,6 +59,7 @@ export async function driveFilesList(q, fields, orderBy) {
   u.searchParams.set("fields", fields);
   u.searchParams.set("pageSize", "200");
   if (orderBy) u.searchParams.set("orderBy", orderBy);
+  if (pageToken) u.searchParams.set("pageToken", pageToken);
   return readJsonResponse(u.toString(), { method: "GET" });
 }
 

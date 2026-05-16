@@ -1,0 +1,22 @@
+# /etc/systemd/system/tender-prep-embeddings.service
+# sudo cp tender-prep-embeddings.service.example /etc/systemd/system/tender-prep-embeddings.service
+# sudo systemctl daemon-reload && sudo systemctl enable --now tender-prep-embeddings
+
+[Unit]
+Description=tender-prep local embeddings (CPU)
+After=network.target
+
+[Service]
+Type=simple
+User=tender
+WorkingDirectory=/opt/tender-prep
+Environment=LOCAL_EMBEDDINGS_HOST=127.0.0.1
+Environment=LOCAL_EMBEDDINGS_PORT=8765
+Environment=LOCAL_EMBEDDINGS_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+Environment=LOCAL_EMBEDDINGS_API_KEY=CHANGE_ME
+ExecStart=/opt/tender-prep/.venv/bin/python /opt/tender-prep/scripts/local_openai_embeddings/server.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

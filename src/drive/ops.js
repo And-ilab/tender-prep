@@ -20,12 +20,17 @@ import {
 export async function listChildren(folderId) {
   assertCredentialsFile();
   const q = `'${folderId}' in parents and trashed = false`;
-  const data = await driveFilesList(
-    q,
-    "files(id, name, mimeType, modifiedTime, size, webViewLink)",
-    "folder,name",
-  );
-  return data.files ?? [];
+  const fields = "nextPageToken, files(id, name, mimeType, modifiedTime, size, webViewLink)";
+  /** @type {Record<string, unknown>[]} */
+  const all = [];
+  let pageToken;
+  do {
+    const data = await driveFilesList(q, fields, "folder,name", pageToken);
+    const chunk = data.files ?? [];
+    for (const f of chunk) all.push(f);
+    pageToken = /** @type {string | undefined} */ (data.nextPageToken);
+  } while (pageToken);
+  return all;
 }
 
 /**

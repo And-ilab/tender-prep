@@ -1,0 +1,7 @@
+# Локальные эмбеддинги на CPU. Python >= 3.10 (на 3.14 без GPU используйте этот набор — см. README).
+# Тяжёлая зависимость: torch (есть готовые wheels под Windows); зато без fastembed/py-rust-stemmers.
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+sentence-transformers>=3.0.0
+certifi>=2024.0.0
+truststore>=0.10.0

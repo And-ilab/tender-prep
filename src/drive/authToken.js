@@ -1,6 +1,12 @@
 import { readFileSync } from "node:fs";
 import { createSign } from "node:crypto";
-import { credentialsPath } from "./config.js";
+import {
+  credentialsPath,
+  oauthClientSecretsPath,
+  oauthTokenPath,
+  useUserOAuthForDrive,
+} from "./config.js";
+import { clearUserOAuthCache, getUserOAuthAccessToken } from "./userOAuth.js";
 
 const SCOPE = "https://www.googleapis.com/auth/drive";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -94,11 +100,15 @@ export async function getCachedAccessToken(keyFilePath) {
  */
 export function clearTokenCache() {
   cache = null;
+  clearUserOAuthCache();
 }
 
 /**
- * Токен с учётом пути из окружения.
+ * Токен с учётом окружения: OAuth пользователя или сервисный аккаунт.
  */
 export async function getDriveAccessToken() {
+  if (useUserOAuthForDrive()) {
+    return getUserOAuthAccessToken(oauthClientSecretsPath(), oauthTokenPath());
+  }
   return getCachedAccessToken(credentialsPath());
 }

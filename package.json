@@ -6,9 +6,15 @@
   "description": "Модуль «Лена»: тендерный контракт, валидация, матрица; Google Drive через встроенный fetch (без googleapis)",
   "scripts": {
     "lena": "node src/cli.js",
-    "telegram:smoke": "node src/telegram/smoke-poll.mjs"
+    "telegram:smoke": "node src/telegram/smoke-poll.mjs",
+    "lena:telegram": "node src/telegram/lena-bot.mjs",
+    "lena:tenders": "node src/cli.js tenders",
+    "icetrade:playwright-auth": "node scripts/icetrade-playwright-auth.mjs"
   },
   "engines": {
     "node": ">=20"
+  },
+  "optionalDependencies": {
+    "playwright": "^1.49.0"
   }
 }

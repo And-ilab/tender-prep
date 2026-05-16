@@ -2,7 +2,7 @@
 
 **Пошаговая настройка Google Cloud, Drive API и JSON-ключа:** отдельный файл [GOOGLE_DRIVE_GCP_SETUP.md](GOOGLE_DRIVE_GCP_SETUP.md).
 
-Цель — чтобы **Лена** (агент или оператор по сценарию) работала с **одной согласованной структурой** на Google Drive: сама **создавала и переименовывала** папки под тендеры, **видела шаблоны** документов, **подтягивала ранее положенные файлы** как общий контекст.
+Цель — чтобы **Лена** — **специалист по подготовке тендерных документов** (агент по сценарию или оператор) — работала с **одной согласованной структурой** на Google Drive: сама **создавала и переименовывала** папки под тендеры, **видела шаблоны** документов, **подтягивала ранее положенные файлы** как общий контекст.
 
 ## Корень и служебная папка `_lena`
 
@@ -17,16 +17,18 @@
     templates/     ← шаблоны заявок (копируете в тендер через template-copy)
     library/       ← справочники, регламенты, выдержки (не обязательно «шаблон на копирование»)
     context/       ← общий контекст между тендерами: стиль, глоссарий, фрагменты прошлых ответов
+    org-docs/      ← универсальные документы организации на все тендеры: справка банка (со сроком), бух. баланс, ОФР и т.п.; см. [LENA_RULES.md](LENA_RULES.md) §6b
+    founding-docs/ ← учредительные и редко меняющиеся: свидетельство о регистрации, устав, приказ о директоре; см. [LENA_RULES.md](LENA_RULES.md) §6c
     tenders/
       <ГГГГ>/                        ← по умолчанию текущий год (или LENA_DEFAULT_TENDER_YEAR)
         <tender_id>/
-          inputs/
+          inputs/                    ← комплект документов закупки с площадки / из извещения (в продукте: «документы заказчика»); сюда же кладём скачанные файлы до парсинга
           drafts/
           exports/
           attachments/               ← доказательства, приложения к матрице
-          notes/                     ← разъяснения, переписка, короткие заметки
+          notes/                     ← разъяснения, переписка, короткие заметки; лог с менеджерами в Telegram — `telegram-managers-log.md` (см. LENA_RULES §6e)
       <tender_id>/                   ← только если явно указали режим flat (без года)
-        inputs/
+        inputs/                     ← то же: комплект закупки («документы заказчика»)
         …
 ```
 
@@ -40,15 +42,37 @@
 
 **Справочники:** `_lena/library` — `library-list`, `agent-bundle` (поле `libraryFiles`).
 
-**Контекст:** `_lena/context` — `context-list`, `context-pull`.
+**Контекст:** `_lena/context` — `context-list`, `context-pull`, поле `contextFiles` в `agent-bundle`. Дополнительно можно задать **`LENA_EXTRA_CONTEXT_FOLDERS`**: через запятую/перенос строки — URL или id **других папок** на том же Диске (расшаренных на тот же сервисный аккаунт); файлы из корня каждой папки **подмешиваются** в тот же список и в бандл (с полями `lenaContextSource`, `lenaContextExtraRootId`). Вложенные подпапки внутри доп. корней не обходятся.
 
-**Тендер:** `workspace-tender` (год по умолчанию или `ГГГГ`, либо `flat`); внутри — `inputs`, `drafts`, `exports`, `attachments`, `notes`. Копия шаблона: `template-copy` (см. `drive` — `flat`, год или только новое имя).
+**Универсальные документы организации:** `_lena/org-docs` — файлы, общие для **всех** тендеров (справка банка со сроком действия, бухгалтерский баланс, отчёт о прибылях и убытках и аналоги). Создаётся при `workspace-ensure`; список: `drive org-docs-list <root>`; в `agent-bundle` — поля **`lena.orgDocsFolderId`** и **`orgDocsFiles`**. Сценарий работы Лены (запрос загрузки, подтверждение через «Ответить», реестр, повторное использование) — в [LENA_RULES.md](LENA_RULES.md) (раздел 6b).
+
+**Учредительные документы:** `_lena/founding-docs` — документы, которые **не меняются** (например **свидетельство о регистрации**) или меняются **очень редко** (**устав**, **приказ о назначении директора** и т.п.). Те же правила, что для `org-docs`: один раз запросил загрузку → проверил → внёс в реестр → дальше берёшь из папки. Создаётся при `workspace-ensure`; список: `drive founding-docs-list <root>`; в `agent-bundle` — **`lena.foundingDocsFolderId`** и **`foundingDocsFiles`**. Подробнее — [LENA_RULES.md](LENA_RULES.md) §6c.
+
+**Тендер:** `workspace-tender` (год по умолчанию или `ГГГГ`, либо `flat`); внутри — `inputs`, `drafts`, `exports`, `attachments`, **`notes`** (в т.ч. **`telegram-managers-log.md`** — контекстный лог переписки с менеджерами по этому тендеру, см. [LENA_RULES.md](LENA_RULES.md) §6e). Копия шаблона: `template-copy` (см. `drive` — `flat`, год или только новое имя).
+
+<a id="lena-long-memory-archive"></a>
+
+### Долгая память: архив тендеров
+
+Цель — чтобы Лена видела **накопленный архив** (например папка года на Drive с проектами «заказчик / участие») как **единый индекс со ссылками**, не обязательно вытягивая все PDF в промпт.
+
+1. **Корень Лены** — папка, в которой после `workspace-ensure` есть `_lena/context` (тот же `<root>`, что в Telegram и в `agent-bundle`).
+2. **Архив** — отдельная папка на Drive (может быть вне `_lena`), расшарена на тот же сервисный аккаунт с правом **чтения** (для обхода достаточно просмотра и построения манифеста).
+3. Собрать индекс:  
+   `node src/cli.js drive archive-context-build <URL_или_id_архива> <URL_или_id_корня_Лены> [maxDepth] [maxFiles]`  
+   Команда строит Markdown и пытается загрузить его в `_lena/context`. Если загрузка с сервисного аккаунта в «Мой диск» возвращает **403 (нет квоты у SA)** — файл остаётся в **текущей рабочей папке** проекта (`archive-context-…md`); его нужно **один раз вручную** перенести в `_lena/context` в UI Drive (или перенести рабочий корень на [общий диск](#общие-диски-shared-drives), где SA может создавать файлы).
+4. **Проверка:** `drive context-list <root>` — в списке должен появиться новый `.md`. В Telegram: `/context`.
+5. **`LENA_EXTRA_CONTEXT_FOLDERS`** для архива годится только если нужные файлы лежат **в корне** указанных папок (вложенность не индексируется). Для дерева «проект/подпапки/файлы» надёжнее именно **индекс** из шага 3 в `_lena/context`.
+
+Общая стратегия «архив vs короткие директивы» — в [LENA_CONTEXT_STRATEGY.md](LENA_CONTEXT_STRATEGY.md).
 
 ## Настройка доступа (сервисный аккаунт)
 
 Полная пошаговая инструкция (проект, биллинг, включение API, ключ, шаринг папки, `GOOGLE_DRIVE_CREDENTIALS`, проверка `node`): **[GOOGLE_DRIVE_GCP_SETUP.md](GOOGLE_DRIVE_GCP_SETUP.md)**.
 
 Кратко: JSON-ключ сервисного аккаунта + переменная **`GOOGLE_DRIVE_CREDENTIALS`** (или **`GOOGLE_APPLICATION_CREDENTIALS`**) + папка на Диске расшарена на **`client_email`** из JSON с ролью **Редактор**.
+
+**Личный аккаунт Gmail (без Workspace):** запись от имени пользователя через OAuth — **[GOOGLE_DRIVE_OAUTH.md](GOOGLE_DRIVE_OAUTH.md)** (`GOOGLE_DRIVE_OAUTH_CLIENT`, `GOOGLE_DRIVE_OAUTH_TOKEN`, команда `drive oauth-login`).
 
 ## Установка
 
@@ -64,16 +88,23 @@ cd tender-prep
 
 | Команда | Назначение |
 |---------|------------|
-| `drive workspace-ensure <root>` | Создать `_lena/{templates,library,context,tenders}` при отсутствии |
+| `drive workspace-ensure <root>` | Создать `_lena/{templates,library,context,org-docs,founding-docs,tenders}` при отсутствии |
 | `drive workspace-layout <root>` | Показать id папок (без создания) |
 | `drive workspace-tender <root> <tenderId> [ГГГГ\|flat]` | Папка тендера; по умолчанию год в пути; `flat` — без года (legacy) |
 | `drive templates-list <root>` | Список в `_lena/templates` |
 | `drive library-list <root>` | Список в `_lena/library` |
-| `drive context-list <root>` | Список в `_lena/context` |
-| `drive context-pull <root> <локальнаяПапка>` | Выгрузить контекст локально |
+| `drive org-docs-list <root>` | Список в `_lena/org-docs` |
+| `drive founding-docs-list <root>` | Список в `_lena/founding-docs` (учредительные и редко меняющиеся) |
+| `drive context-list <root>` | Объединённый список: `_lena/context` + папки из `LENA_EXTRA_CONTEXT_FOLDERS` |
+| `drive context-pull <root> <локальнаяПапка>` | Выгрузить контекст локально (подпапки по источнику: `_lena_context`, имя доп. папки) |
 | `drive template-copy <root> <id> <tenderId> [flat\|ГГГГ\|имя] [имя]` | Копия в `drafts`; год по умолчанию; `flat` — без года |
 | `drive item-rename <id> <новоеИмя>` | Переименовать файл или папку |
 | `drive agent-bundle <root> [tenderId] [ГГГГ\|flat]` | JSON: папки, шаблоны, library, контекст, тендер |
+| `drive tenders-inventory <root>` | Сводка всех тендеров под `_lena/tenders`: год, имя папки, число файлов в inputs/drafts/… ([CORPUS_AND_RAG.md](CORPUS_AND_RAG.md)) |
+| `drive corpus-manifest <folder> [maxDepth] [maxFiles]` | Рекурсивный список всех **файлов** под папкой (метаданные; для архива вроде «тендеры 2025»). См. [CORPUS_AND_RAG.md](CORPUS_AND_RAG.md) |
+| `drive corpus-pull <folder> <локальнаяПапка> [maxDepth] [maxFiles]` | Рекурсивная **выгрузка** файлов с Drive в локальную папку (сохранение путей). См. [CORPUS_AND_RAG.md](CORPUS_AND_RAG.md) |
+| `drive corpus-jsonl <folder> [maxDepth] [maxFiles]` | В stdout: **JSONL** — по строке на каждый файл (очередь для parserit). См. [PARSERIT_INTEGRATION.md](PARSERIT_INTEGRATION.md) |
+| `drive archive-context-build <архив> <корень_Лены> [maxDepth] [maxFiles]` | Рекурсивный обход архива → Markdown-индекс (проект / заказчик / участие) → загрузка в `_lena/context`; при 403 SA — файл в cwd, см. [раздел «Долгая память»](#lena-long-memory-archive) |
 
 Низкоуровневые `list`, `meta`, `download`, `upload` сохраняются для произвольных путей.
 

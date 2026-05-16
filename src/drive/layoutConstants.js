@@ -6,16 +6,22 @@ export const LENA_ROOT_FOLDER = "_lena";
  * - templates — копируемые шаблоны заявок
  * - library — справочники, регламенты, выдержки (не обязательно «шаблоны на копирование»)
  * - context — общий контекст для Лены между тендерами
+ * - org-docs — универсальные документы организации на все тендеры (справка банка со сроком, бух. баланс, ОФР и т.п.)
+ * - founding-docs — учредительные и «редко меняющиеся» корпоративные документы (свидетельство о регистрации, устав, приказ о назначении директора и т.п.)
  * - tenders — закупки: по умолчанию `_lena/tenders/<ГГГГ>/<tender_id>/…` (год = `LENA_DEFAULT_TENDER_YEAR` или текущий календарный); режим `flat` — без года в пути
  */
 export const LENA_SUB = {
   templates: "templates",
   library: "library",
   context: "context",
+  orgDocs: "org-docs",
+  foundingDocs: "founding-docs",
   tenders: "tenders",
 };
 
-/** Внутри каждого тендера (после опционального `tenders/<YYYY>/`). */
+/** Внутри каждого тендера (после опционального `tenders/<YYYY>/`).
+ * `inputs` — сырой комплект документов закупки с ЭТП/извещения (в продуктовых текстах: «документы заказчика»).
+ */
 export const TENDER_SUB = {
   inputs: "inputs",
   drafts: "drafts",
