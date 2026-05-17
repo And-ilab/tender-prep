@@ -29,6 +29,8 @@ node src/telegram/smoke-poll.mjs
 
 Это проверяет только связку **Telegram Bot API ↔ ваш процесс**, без Google.
 
+**Зависимости Node:** один раз из корня репозитория выполните `npm install`. Пакеты **`mammoth`**, **`pdf-parse`**, **`word-extractor`** нужны для **`/tenderextract`** и сценариев с парсингом PDF/DOC/DOCX; для **OCR сканов** (после `pdf-parse`) — **`tesseract.js`**, **`pdfjs-dist`**, **`@napi-rs/canvas`**. Они **подгружаются при работе** extract, так что бот и IceTrade bootstrap стартуют и без установленного `node_modules` (но тогда extract вернёт ошибку до успешного `npm install`). Если установка срывается с **`UNABLE_TO_VERIFY_LEAF_SIGNATURE`** (в т.ч. при скачивании `@napi-rs/canvas`), задайте в той же консоли **`NODE_OPTIONS=--use-openssl-ca`** и повторите `npm install`; на новых версиях Node попробуйте **`NODE_OPTIONS=--use-system-ca`**. При необходимости задайте **`NODE_EXTRA_CA_CERTS`** на путь к `.pem` корпоративного CA, либо подключите корневой сертификат в системе/Node.
+
 ## 4. Бот «Лена» (Drive из чата)
 
 Скрипт `src/telegram/lena-bot.mjs` отвечает в группе на команды и читает ту же структуру `_lena/`, что и CLI (`workspace.js`).
@@ -56,15 +58,20 @@ node src/telegram/smoke-poll.mjs
 | `LENA_RAG_TOP_K` | опционально: число фрагментов по умолчанию (иначе 8), макс. 24 |
 | `LENA_ICETRADE_BOOT_MAX_FILES` | опционально: макс. число файлов за один bootstrap IceTrade→inputs (по умолчанию 30) |
 | `LENA_ICETRADE_FETCH_TIMEOUT_MS` | опционально: таймаут HTTP к карточке IceTrade и скачивания файла в мс (по умолчанию 25000) |
+| `LENA_ICETRADE_PLAYWRIGHT` | `1` / `true` — карточка IceTrade в Chromium (нужны `playwright` + `npx playwright install chromium`) |
+| `LENA_ICETRADE_PLAYWRIGHT_STORAGE` | путь к **существующему** JSON после `npm run icetrade:playwright-auth` (куки Chromium с карточки); неверный путь = предупреждение |
+| `LENA_ICETRADE_COOKIE` | опционально: заголовок Cookie из DevTools — если `getFile` отдаёт HTML автоматике, хотя в браузере тот же файл открывается |
+| `LENA_ICETRADE_PLAYWRIGHT_DOWNLOAD_PRIME_MS` | пауза мс после открытия карточки в том же Chromium, что качает вложения (по умолчанию 2000; при сбоях попробуйте 3500–4000) |
+| `LENA_ICETRADE_PLAYWRIGHT_FILE_DOWNLOAD` | `0` — не качать вложения через Playwright (только Node HTTP) |
 
-**Команды в Telegram:** `/help`, `/product` (IceTrade, Drive, политика корпуса RAG — см. [PRODUCT_CONTEXT.md](PRODUCT_CONTEXT.md)), `/templates`, `/library`, `/orgdocs`, `/foundingdocs`, `/context`, `/bundle <tender_id> [ГГГГ|flat]`, `/ingest <tender_id> [ГГГГ|flat] <папка_Drive>`, `/ask …`, **`/archivesearch …`** (алиас `/searcharchive`), **`/archiveask …`** (алиас `/askarchive`), `/tenderask …`, `/newchat`.
+Для вложений с площадки обычно нужны **Playwright** и рабочая **сессия** (`STORAGE` или `COOKIE`). Подробнее см. `examples/env.telegram.example` (блок IceTrade). `/help`, `/product` (IceTrade, Drive, политика корпуса RAG — см. [PRODUCT_CONTEXT.md](PRODUCT_CONTEXT.md)), `/templates`, `/library`, `/orgdocs`, `/foundingdocs`, `/context`, `/bundle <tender_id> [ГГГГ|flat]`, `/ingest <tender_id> [ГГГГ|flat] <папка_Drive>`, `/ask …`, **`/archivesearch …`** (алиас `/searcharchive`), **`/archiveask …`** (алиас `/askarchive`), `/tenderask …`, `/newchat`.
 
-Дополнительно в **группе**, если сообщение **обращено к боту** (@username / Reply / mention): бот распознаёт ссылку IceTrade (`https://` или без) и выполняет **bootstrap**: создаёт папку тендера на Drive (`tender_id` = номер view на площадке), пробует скачать вложения в **`inputs`** и добавляет в **`notes`** файл с чеклистом того, что **запросить у менеджера**. Полный разбор PDF/OCR — через parserit/Windmill отдельно (см. [PARSERIT_INTEGRATION.md](PARSERIT_INTEGRATION.md)). То же из CLI: `node src/cli.js tenders icetrade-bootstrap <root> <url|id> [flat|ГГГГ]`.
+Дополнительно в **группе**, если сообщение **обращено к боту** (@username / Reply / mention): бот распознаёт ссылку IceTrade (`https://` или без) и выполняет **bootstrap**: создаёт папку тендера на Drive (`tender_id` = номер view на площадке), пишет в **`inputs/icetrade-import-snapshot.json`** снимок полей карточки и **событий** (хронология), пробует скачать вложения в **`inputs`** и добавляет в **`notes`** файл с чеклистом того, что **запросить у менеджера**. В ответе в чате бот явно перечисляет загрузку файлов и ссылку/имя снимка. Полный разбор PDF/OCR — через parserit/Windmill отдельно (см. [PARSERIT_INTEGRATION.md](PARSERIT_INTEGRATION.md)). То же из CLI: `node src/cli.js tenders icetrade-bootstrap <root> <url|id> [flat|ГГГГ]`. Пайплайн: [TENDER_PIPELINE.md](TENDER_PIPELINE.md).
 
 Тот же **IceTrade bootstrap** без Telegram:
 
 ```bash
-node src/cli.js tenders icetrade-bootstrap <LENA_DRIVE_ROOT_или_id> "https://icetrade.by/tenders/all/view/1336119"
+node src/cli.js tenders icetrade-bootstrap <LENA_DRIVE_ROOT_или_id> "https://icetrade.by/tenders/all/view/1336510"
 ```
 
 **Архив (RAG):** команды ищут по **локальному** индексу на машине, где запущен бот. Держите в отдельном окне **сервер эмбеддингов** (`scripts/local_openai_embeddings/server.py`), если `LENA_EMBEDDING_BASE_URL` указывает на `127.0.0.1`.

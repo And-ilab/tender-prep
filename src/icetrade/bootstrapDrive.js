@@ -3,13 +3,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { assertCredentialsFile } from "../drive/config.js";
-import { listChildren, uploadFile } from "../drive/ops.js";
+import { getMetadata, listChildren, trashDriveFile, uploadFile } from "../drive/ops.js";
 import { ensureTenderTree } from "../drive/workspace.js";
 import { extractIceTradeViewIds, normalizeIceTradeViewId } from "./viewIds.js";
-import { fetchIceTradeCardHtml, downloadIceTradeBinary } from "./fetchPage.js";
-import { fetchIceTradeCardHtmlPlaywright, iceTradePlaywrightEnabled } from "./fetchPageRendered.js";
+import { fetchIceTradeCardHtml, downloadIceTradeBinary, validateAttachmentBuffer } from "./fetchPage.js";
+import {
+  fetchIceTradeCardHtmlPlaywright,
+  iceTradePlaywrightEnabled,
+  withPlaywrightIceTradeDownloadBatch,
+} from "./fetchPageRendered.js";
 import { iceTradePythonFetchMode, runPythonIceTradeFetch } from "./bootstrapPythonSidecar.js";
 import { extractAttachmentCandidates, isIceTradeLoginWallHtml, isIceTradePlatformHelpAttachment } from "./scrapeAttachments.js";
+import { buildIceTradeImportSnapshot, importSnapshotToJson } from "./importPageMeta.js";
 
 const VIEW_PAGE = (/** @type {string} */ id) => `https://icetrade.by/tenders/all/view/${id}`;
 
@@ -54,6 +59,28 @@ function safeBasename(name) {
     .replace(/[\\/:*?"<>|]+/g, "_")
     .replace(/\s+/g, " ");
   return (s.slice(0, 180) || "file").trim();
+}
+
+function driveFileSizeBytes(f) {
+  const s = /** @type {{ size?: string }} */ (f).size;
+  if (s === undefined || s === null) return 0;
+  const n = Number.parseInt(String(s), 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * PDF на Drive меньше порога — типично «заглушка» после неудачной загрузки; разрешаем замену при следующем bootstrap.
+ * Порог: **LENA_ICETRADE_REPLACE_PDF_IF_BYTES_BELOW** (по умолчанию 96 KiB).
+ * @param {{ name?: string, size?: string, id?: string }} fileMeta
+ * @param {string} fileName
+ */
+function shouldReplaceSmallPdfOnDrive(fileMeta, fileName) {
+  const low = fileName.toLowerCase();
+  if (!low.endsWith(".pdf")) return false;
+  const threshold =
+    Number.parseInt(process.env.LENA_ICETRADE_REPLACE_PDF_IF_BYTES_BELOW?.trim() ?? "98304", 10) || 98304;
+  const sz = driveFileSizeBytes(fileMeta);
+  return sz > 0 && sz < threshold;
 }
 
 function guessFileNameFromUrl(url) {
@@ -105,10 +132,12 @@ async function downloadExternalToTemp(url, tmpRoot, timeoutMs, refererPageUrl, l
     Accept: "*/*",
     Referer: downloadRefererForFileUrl(url, refererPageUrl),
   };
-  const { buffer, contentDisposition } = await downloadIceTradeBinary(url, h, timeoutMs);
+  const { buffer, contentDisposition, contentType } = await downloadIceTradeBinary(url, h, timeoutMs);
   if (buffer.byteLength > maxBytes) throw new Error(`Файл слишком большой (${buffer.byteLength} байт)`);
 
   const fileName = resolveDownloadFileName(url, linkText, contentDisposition);
+  const v = validateAttachmentBuffer(buffer, fileName, contentType);
+  if (!v.ok) throw new Error(v.reason);
   const path = join(tmpRoot, `${Date.now()}-${fileName}`);
   await writeFile(path, buffer);
   return { path, fileName };
@@ -117,6 +146,53 @@ async function downloadExternalToTemp(url, tmpRoot, timeoutMs, refererPageUrl, l
 /** @param {number} ms */
 function sleepMs(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Временный файл → Drive inputs/ (замена маленького PDF, дедуп по имени).
+ * @param {object} p
+ * @param {{ path: string, fileName: string }} p.dl
+ * @param {{ name?: string; id?: string; size?: string }[]} p.inputChildren
+ * @param {Set<string>} p.existing
+ * @param {string} p.inputsId
+ * @param {{ name: string; webViewLink?: string }[]} p.uploaded
+ * @param {string[]} p.errors
+ * @returns {Promise<boolean>} true — загружен новый файл
+ */
+async function consumeTempFileToInputs(p) {
+  const { dl, inputChildren, existing, inputsId, uploaded, errors } = p;
+  const baseName = dl.fileName;
+  const existingRow = inputChildren.find((f) => f.name === baseName);
+  if (existing.has(baseName) && existingRow) {
+    if (shouldReplaceSmallPdfOnDrive(existingRow, baseName)) {
+      try {
+        await trashDriveFile(String(existingRow.id));
+        existing.delete(baseName);
+        const ix = inputChildren.findIndex((f) => f.name === baseName);
+        if (ix >= 0) inputChildren.splice(ix, 1);
+        errors.push(
+          `Замена слишком маленького PDF на Drive: **${baseName}** (было **${driveFileSizeBytes(existingRow)}** B).`,
+        );
+      } catch (te) {
+        errors.push(`Не удалось удалить старый **${baseName}**: ${te instanceof Error ? te.message : String(te)}`);
+        await rm(dl.path, { force: true }).catch(() => {});
+        return false;
+      }
+    } else {
+      errors.push(`Уже есть на Drive: ${baseName}`);
+      await rm(dl.path, { force: true }).catch(() => {});
+      return false;
+    }
+  }
+  const meta = await uploadFile(inputsId, dl.path, baseName);
+  const metaObj = /** @type {{ name?: string; webViewLink?: string }} */ (meta);
+  uploaded.push({
+    name: metaObj.name ?? baseName,
+    webViewLink: metaObj.webViewLink,
+  });
+  existing.add(baseName);
+  await rm(dl.path, { force: true }).catch(() => {});
+  return true;
 }
 
 /**
@@ -146,16 +222,32 @@ async function downloadExternalToTempWithRetry(url, tmpRoot, timeoutMs, refererP
 }
 
 /**
- * @param {{ viewId: string, pageUrl: string, uploaded: { name: string, webViewLink?: string }[], candidates: { url: string, linkText?: string }[], errors: string[], cardFetchVia?: string }} p
+ * @param {{ viewId: string, pageUrl: string, uploaded: { name: string, webViewLink?: string }[], candidates: { url: string, linkText?: string }[], errors: string[], cardFetchVia?: string, importSnapshot?: unknown, tenderFolderUrl?: string, inputsFolderUrl?: string }} p
  */
 function buildBootstrapMarkdown(p) {
-  const { viewId, pageUrl, uploaded, candidates, errors, cardFetchVia } = p;
+  const {
+    viewId,
+    pageUrl,
+    uploaded,
+    candidates,
+    errors,
+    cardFetchVia,
+    importSnapshot,
+    tenderFolderUrl,
+    inputsFolderUrl,
+  } = p;
+  const snap = /** @type {{ name?: string; webViewLink?: string } | null} */ (importSnapshot ?? null);
   return [
     `# IceTrade · bootstrap · view ${viewId}`,
     "",
     `- Карточка: ${pageUrl}`,
+    ...(tenderFolderUrl ? [`- Папка тендера (Google Drive): ${tenderFolderUrl}`] : []),
+    ...(inputsFolderUrl ? [`- Документы заказчика (**inputs/**): ${inputsFolderUrl}`] : []),
     ...(cardFetchVia ? [`- HTML карточки: получен через **${cardFetchVia}**`] : []),
     `- UTC: ${new Date().toISOString()}`,
+    snap
+      ? `- Снимок импорта (поля карточки, **события**): **inputs/${snap.name ?? "icetrade-import-snapshot.json"}**${snap.webViewLink ? ` (${snap.webViewLink})` : ""}`
+      : `- Снимок импорта: **не загружен** — см. ошибки ниже`,
     "",
     "## Загружено в inputs (документы заказчика)",
     uploaded.length
@@ -173,7 +265,7 @@ function buildBootstrapMarkdown(p) {
     "## Что Лена не закроет без менеджера (проверить и запросить)",
     "",
     "- Коммерческое предложение и цена (НДС — как в документации закупки); см. §6d в LENA_RULES.",
-    "- Справка банка, выписки, отчётность — если требует закупка; универсальные файлы в `_lena/org-docs`.",
+    "- Справка банка / выписка — запросить у банка с параметрами из КД: **дата выдачи**, **против какой даты** актуальна сумма, **какой счёт** (если указано); если в КД нет явных сроков — попросить ориентир (часто: не ранее **1-го числа месяца** подачи заявки или **не старше 30 дней** до дня подачи — сверить с полным текстом).",
     "- Учредительные / регистрационные при необходимости (`_lena/founding-docs`).",
     "- Документы только с оригиналом / подписью, недоступные автоматически с ЭТП.",
     "- Подтверждение допусков, предмета, исключений из реестров.",
@@ -184,7 +276,7 @@ function buildBootstrapMarkdown(p) {
 }
 
 /**
- * Создаёт дерево тендера, качает вложения с HTML-карточки (эвристика), кладёт в inputs, добавляет notes/icetrade-bootstrap-*.md.
+ * Создаёт дерево тендера, качает вложения с HTML-карточки (эвристика), кладёт в inputs, пишет **inputs/icetrade-import-snapshot.json** (поля + события), добавляет notes/icetrade-bootstrap-*.md.
  * @param {string} userRootId — корень Drive (куда смотрит LENA_DRIVE_ROOT)
  * @param {string} urlOrText — URL или текст с URL / голый view id
  * @param {{ flat?: boolean, year?: string }} [opts]
@@ -205,6 +297,21 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
 
   const pageUrl = VIEW_PAGE(viewId);
   const { tender } = await ensureTenderTree(userRootId, viewId, { flat, year });
+  const inputsId = tender.inputsId;
+
+  /** @type {string | undefined} */
+  let tenderRootWebViewLink;
+  /** @type {string | undefined} */
+  let inputsFolderWebViewLink;
+  try {
+    const tr = await getMetadata(tender.folderId);
+    tenderRootWebViewLink = typeof tr.webViewLink === "string" ? tr.webViewLink : undefined;
+    const ir = await getMetadata(inputsId);
+    inputsFolderWebViewLink = typeof ir.webViewLink === "string" ? ir.webViewLink : undefined;
+  } catch {
+    tenderRootWebViewLink = undefined;
+    inputsFolderWebViewLink = undefined;
+  }
 
   const tmpRoot = await mkdtemp(join(tmpdir(), "lena-ice-"));
   /** @type {{ name: string, webViewLink?: string }[]} */
@@ -254,7 +361,7 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
 
   if (html && isIceTradeLoginWallHtml(html)) {
     errors.push(
-      "Похоже, вместо карточки пришла **только страница входа** (редирект на логин для этой закупки или другой ответ CDN). Вложения на IceTrade часто **публичные** — если в браузере без входа файлы открываются, проверьте **fetch** с машины бота (TLS/прокси) и повторите.",
+      "Похоже, вместо полной карточки пришёл HTML **с формой входа** (эвристика). Часто это редирект/ответ площадки на «неудобный» клиент, а не требование ЛК: во многих закупках файлы открываются и в инкогнито. Проверьте TLS/прокси, **User-Agent**, при необходимости **LENA_ICETRADE_PLAYWRIGHT** и таймауты.",
     );
   }
 
@@ -309,41 +416,118 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
       `**Playwright / сеть (Node):** накоплено **${networkFileUrls.length}** URL из XHR; кандидатов к скачиванию после фильтра — **${candidates.length}**.`,
     );
   }
-  const inputsId = tender.inputsId;
-  const existing = new Set((await listChildren(inputsId)).map((f) => f.name));
+  let inputChildren = await listChildren(inputsId);
+  const existing = new Set(inputChildren.map((f) => f.name));
+
+  const SNAPSHOT_DRIVE_NAME = "icetrade-import-snapshot.json";
+  /** @type {unknown} */
+  let importSnapshotUpload = null;
+  try {
+    const snap = buildIceTradeImportSnapshot(html || "", { pageUrl, viewId, cardFetchVia });
+    for (const w of snap.warnings ?? []) {
+      if (w) errors.push(`Снимок карточки: ${w}`);
+    }
+    if (snap.events?.some((e) => e?.severity === "cancel")) {
+      errors.push(
+        "Снимок карточки: в хронологии есть событие уровня **отмена / аннулирование** — проверьте актуальный статус закупки.",
+      );
+    }
+    const snapLocal = join(tmpRoot, SNAPSHOT_DRIVE_NAME);
+    await writeFile(snapLocal, importSnapshotToJson(snap), "utf8");
+    const prevSnap = inputChildren.find((f) => f.name === SNAPSHOT_DRIVE_NAME);
+    if (prevSnap?.id) {
+      try {
+        await trashDriveFile(prevSnap.id);
+      } catch (e) {
+        errors.push(`Корзина Drive (старый ${SNAPSHOT_DRIVE_NAME}): ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    importSnapshotUpload = await uploadFile(inputsId, snapLocal, SNAPSHOT_DRIVE_NAME);
+    await rm(snapLocal, { force: true }).catch(() => {});
+  } catch (e) {
+    errors.push(`Снимок карточки (${SNAPSHOT_DRIVE_NAME}): ${e instanceof Error ? e.message : String(e)}`);
+  }
 
   const betweenFiles = Math.max(
     0,
     Number.parseInt(process.env.LENA_ICETRADE_DOWNLOAD_GAP_MS?.trim() ?? "350", 10) || 350,
   );
 
+  const rawPwDl = process.env.LENA_ICETRADE_PLAYWRIGHT_FILE_DOWNLOAD?.trim().toLowerCase() ?? "";
+  const usePwBatchDl =
+    iceTradePlaywrightEnabled() &&
+    cardFetchVia === "playwright" &&
+    rawPwDl !== "0" &&
+    rawPwDl !== "false" &&
+    rawPwDl !== "no" &&
+    rawPwDl !== "off";
+
   let n = 0;
-  for (const item of candidates) {
-    const fileUrl = item.url;
-    if (n >= maxFiles) {
-      errors.push(`Достигнут лимит файлов (${maxFiles}), остальное пропущено.`);
-      break;
-    }
+  let usedPlaywrightFileBatch = false;
+
+  if (usePwBatchDl && candidates.length > 0) {
     try {
-      if (n > 0 && betweenFiles > 0) await sleepMs(betweenFiles);
-      const dl = await downloadExternalToTempWithRetry(fileUrl, tmpRoot, timeoutMs, pageUrl, item.linkText);
-      const baseName = dl.fileName;
-      if (existing.has(baseName)) {
-        errors.push(`Уже есть на Drive: ${baseName}`);
-        await rm(dl.path, { force: true }).catch(() => {});
-        continue;
-      }
-      const meta = await uploadFile(inputsId, dl.path, baseName);
-      const metaObj = /** @type {{ name?: string; webViewLink?: string }} */ (meta);
-      uploaded.push({
-        name: metaObj.name ?? baseName,
-        webViewLink: metaObj.webViewLink,
+      await withPlaywrightIceTradeDownloadBatch(timeoutMs, pageUrl, async ({ requestBinary }) => {
+        for (const item of candidates) {
+          const fileUrl = item.url;
+          if (n >= maxFiles) {
+            errors.push(`Достигнут лимит файлов (${maxFiles}), остальное пропущено.`);
+            break;
+          }
+          try {
+            if (n > 0 && betweenFiles > 0) await sleepMs(betweenFiles);
+            const { buffer, contentType, contentDisposition } = await requestBinary(fileUrl, pageUrl);
+            const maxBytes = 45 * 1024 * 1024;
+            if (buffer.byteLength > maxBytes) throw new Error(`Файл слишком большой (${buffer.byteLength} байт)`);
+            const baseName = resolveDownloadFileName(fileUrl, item.linkText, contentDisposition);
+            const v = validateAttachmentBuffer(buffer, baseName, contentType);
+            if (!v.ok) throw new Error(v.reason);
+            const dlPath = join(tmpRoot, `pw-${Date.now()}-${baseName}`);
+            await writeFile(dlPath, buffer);
+            const uploadedOk = await consumeTempFileToInputs({
+              dl: { path: dlPath, fileName: baseName },
+              inputChildren,
+              existing,
+              inputsId,
+              uploaded,
+              errors,
+            });
+            if (uploadedOk) n += 1;
+          } catch (e) {
+            errors.push(`${fileUrl}: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
       });
-      existing.add(baseName);
-      n += 1;
-      await rm(dl.path, { force: true }).catch(() => {});
+      usedPlaywrightFileBatch = true;
     } catch (e) {
-      errors.push(`${fileUrl}: ${e instanceof Error ? e.message : String(e)}`);
+      errors.push(
+        `Скачивание вложений через Playwright: ${e instanceof Error ? e.message : String(e)} — повтор обычным HTTP.`,
+      );
+    }
+  }
+
+  if (!usedPlaywrightFileBatch) {
+    for (const item of candidates) {
+      const fileUrl = item.url;
+      if (n >= maxFiles) {
+        errors.push(`Достигнут лимит файлов (${maxFiles}), остальное пропущено.`);
+        break;
+      }
+      try {
+        if (n > 0 && betweenFiles > 0) await sleepMs(betweenFiles);
+        const dl = await downloadExternalToTempWithRetry(fileUrl, tmpRoot, timeoutMs, pageUrl, item.linkText);
+        const uploadedOk = await consumeTempFileToInputs({
+          dl,
+          inputChildren,
+          existing,
+          inputsId,
+          uploaded,
+          errors,
+        });
+        if (uploadedOk) n += 1;
+      } catch (e) {
+        errors.push(`${fileUrl}: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
   }
 
@@ -356,6 +540,9 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
     candidates,
     errors,
     cardFetchVia,
+    importSnapshot: importSnapshotUpload,
+    tenderFolderUrl: tenderRootWebViewLink,
+    inputsFolderUrl: inputsFolderWebViewLink,
   });
   const notePath = join(tmpRoot, noteName);
   await writeFile(notePath, noteMd, "utf8");
@@ -374,13 +561,16 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
     viewId,
     tenderId: viewId,
     tenderRootFolderId: tender.folderId,
+    tenderRootWebViewLink,
     inputsFolderId: inputsId,
+    inputsFolderWebViewLink,
     notesFolderId: tender.notesId,
     uploaded,
     candidateUrls: candidates,
     cardFetchVia,
     errors,
     noteFile: noteUpload,
+    importSnapshotFile: importSnapshotUpload,
     iceTradeUrl: pageUrl,
     alternateIdsInMessage: extractIceTradeViewIds(urlOrText).filter((x) => x !== viewId),
   };

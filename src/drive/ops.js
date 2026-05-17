@@ -10,6 +10,7 @@ import {
   driveFilesCreate,
   driveFilesGetMeta,
   driveFilesList,
+  driveFilesTrash,
   driveFilesUpdate,
   driveMultipartUpload,
 } from "./driveHttp.js";
@@ -95,4 +96,13 @@ export async function copyFileToFolder(fileId, destFolderId, newName) {
 export async function exportGoogleFile(fileId, exportMime, destPath) {
   assertCredentialsFile();
   await driveExport(fileId, exportMime, createWriteStream(destPath));
+}
+
+/**
+ * Переместить файл в корзину Drive (освободить имя в папке).
+ * @param {string} fileId
+ */
+export async function trashDriveFile(fileId) {
+  assertCredentialsFile();
+  await driveFilesTrash(fileId);
 }

@@ -193,3 +193,21 @@ export async function driveMultipartUpload(folderId, localPath, destName) {
   }
   return JSON.parse(text);
 }
+
+/**
+ * В корзину Drive (файл исчезает из папки).
+ * @param {string} fileId
+ */
+export async function driveFilesTrash(fileId) {
+  const token = await getDriveAccessToken();
+  const u = new URL(`${DRIVE_V3}/files/${encodeURIComponent(fileId)}`);
+  u.searchParams.set("supportsAllDrives", "true");
+  const res = await fetch(u.toString(), {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok && res.status !== 204) {
+    const t = await res.text();
+    throw new Error(`Drive trash ${res.status}: ${t.slice(0, 500)}`);
+  }
+}

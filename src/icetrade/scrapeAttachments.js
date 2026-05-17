@@ -85,7 +85,9 @@ export function isIceTradePlatformHelpAttachment(url, linkText, tenderViewId) {
  */
 
 /**
- * IceTrade при недоступной без сессии карточке отдаёт 200 и HTML формы входа (не редирект 401).
+ * Эвристика: в HTML есть типичная форма входа IceTrade (llogin / «Войти»).
+ * В браузере карточки и файлы часто **доступны без ЛК**; тот же HTML при `getFile` из скрипта
+ * бывает из‑за редиректа/антибота/недостаточно «браузерного» запроса — не значит обязательный логин.
  * @param {string} html
  */
 export function isIceTradeLoginWallHtml(html) {
@@ -212,7 +214,7 @@ function linkLooksLikeAttachment(hrefLower, path, search, onIcetrade, relaxed, l
  * @param {boolean} relaxed
  */
 function tryPushDescriptor(rawHref, linkTextNorm, base, seen, out, relaxed) {
-  const trimmed = rawHref.trim().replace(/^["']|["']$/g, "");
+  const trimmed = decodeHtmlEntities(rawHref.trim().replace(/^["']|["']$/g, ""));
   if (!trimmed || trimmed.startsWith("#") || trimmed.toLowerCase().startsWith("javascript:")) return;
   let abs;
   try {

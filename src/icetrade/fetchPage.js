@@ -161,7 +161,7 @@ export async function fetchIceTradeCardHtml(pageUrl, headers, timeoutMs) {
  * @param {string} urlStr
  * @param {Record<string, string>} headers
  * @param {number} timeoutMs
- * @returns {Promise<{ buffer: Buffer, contentDisposition: string | null }>}
+ * @returns {Promise<{ buffer: Buffer, contentDisposition: string | null, contentType: string | null }>}
  */
 function httpsGetBinary(urlStr, headers, timeoutMs) {
   return new Promise((resolve, reject) => {
@@ -187,7 +187,10 @@ function httpsGetBinary(urlStr, headers, timeoutMs) {
         const rawCd = res.headers["content-disposition"];
         const contentDisposition =
           typeof rawCd === "string" ? rawCd : Array.isArray(rawCd) ? rawCd[0] ?? null : null;
-        resolve({ buffer: Buffer.concat(chunks), contentDisposition });
+        const rawCt = res.headers["content-type"];
+        const rawCtStr = typeof rawCt === "string" ? rawCt : Array.isArray(rawCt) ? rawCt[0] : null;
+        const contentType = rawCtStr ? rawCtStr.split(";")[0].trim().toLowerCase() : null;
+        resolve({ buffer: Buffer.concat(chunks), contentDisposition, contentType });
       });
     });
     req.on("error", reject);
@@ -212,7 +215,9 @@ async function fetchBinaryFetch(url, headers, timeoutMs) {
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const ab = await res.arrayBuffer();
-  return { buffer: Buffer.from(ab), contentDisposition: res.headers.get("content-disposition") };
+  const ctRaw = res.headers.get("content-type");
+  const contentType = ctRaw ? ctRaw.split(";")[0].trim().toLowerCase() : null;
+  return { buffer: Buffer.from(ab), contentDisposition: res.headers.get("content-disposition"), contentType };
 }
 
 /**
@@ -230,7 +235,7 @@ async function downloadBinaryPowerShell(url, timeoutMs) {
       windowsHide: true,
     });
     const buffer = await readFile(outPath);
-    return { buffer, contentDisposition: null };
+    return { buffer, contentDisposition: null, contentType: null };
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
@@ -253,10 +258,54 @@ async function downloadBinaryCurl(url, headers, timeoutMs) {
       { maxBuffer: 256 * 1024 },
     );
     const buffer = await readFile(outPath);
-    return { buffer, contentDisposition: null };
+    return { buffer, contentDisposition: null, contentType: null };
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+/**
+ * Проверка скачанного вложения: отсекаем HTML-заглушки и «не-PDF» с расширением .pdf.
+ * @param {Buffer} buffer
+ * @param {string} fileName
+ * @param {string | null | undefined} contentType — основной тип из HTTP (без параметров)
+ * @returns {{ ok: true } | { ok: false, reason: string }}
+ */
+export function validateAttachmentBuffer(buffer, fileName, contentType) {
+  const low = fileName.toLowerCase();
+  const ct = (contentType || "").toLowerCase();
+  if (!buffer || buffer.length < 16) {
+    return { ok: false, reason: "пустой или слишком короткий ответ" };
+  }
+  if (low.endsWith(".pdf")) {
+    const sig = buffer.subarray(0, 5).toString("latin1");
+    if (!sig.startsWith("%PDF")) {
+      const head = buffer
+        .subarray(0, Math.min(800, buffer.length))
+        .toString("utf8")
+        .trimStart()
+        .slice(0, 200);
+      const hl = head.toLowerCase();
+      if (
+        head.startsWith("<") ||
+        hl.includes("<!doctype") ||
+        hl.includes("<html") ||
+        hl.includes("login") ||
+        hl.includes("доступ")
+      ) {
+        return {
+          ok: false,
+          reason:
+            "вместо PDF получен HTML — для публичных карточек это часто отличие автоматического клиента от браузера (заголовки, TLS, антибот); имеет смысл **LENA_ICETRADE_PLAYWRIGHT** / прогрев карточки, опционально **LENA_ICETRADE_COOKIE** или **STORAGE** как у реального браузера",
+        };
+      }
+      return { ok: false, reason: `ожидался PDF (сигнатура %PDF), получено: «${sig.slice(0, 8)}»` };
+    }
+    if (ct.includes("text/html")) {
+      return { ok: false, reason: "Content-Type указывает text/html при имени .pdf" };
+    }
+  }
+  return { ok: true };
 }
 
 /**
@@ -264,49 +313,49 @@ async function downloadBinaryCurl(url, headers, timeoutMs) {
  * @param {string} url
  * @param {Record<string, string>} headers
  * @param {number} timeoutMs
- * @returns {Promise<{ buffer: Buffer, contentDisposition: string | null, via: string }>}
+ * @returns {Promise<{ buffer: Buffer, contentDisposition: string | null, contentType: string | null, via: string }>}
  */
 export async function downloadIceTradeBinary(url, headers, timeoutMs) {
   const backend = process.env.LENA_ICETRADE_FETCH_BACKEND?.trim().toLowerCase() ?? "auto";
   const h = { ...headers, Accept: headers.Accept ?? "*/*" };
 
   if (backend === "powershell") {
-    const { buffer, contentDisposition } = await downloadBinaryPowerShell(url, timeoutMs);
-    return { buffer, contentDisposition, via: "powershell" };
+    const { buffer, contentDisposition, contentType } = await downloadBinaryPowerShell(url, timeoutMs);
+    return { buffer, contentDisposition, contentType, via: "powershell" };
   }
   if (backend === "curl") {
-    const { buffer, contentDisposition } = await downloadBinaryCurl(url, h, timeoutMs);
-    return { buffer, contentDisposition, via: "curl" };
+    const { buffer, contentDisposition, contentType } = await downloadBinaryCurl(url, h, timeoutMs);
+    return { buffer, contentDisposition, contentType, via: "curl" };
   }
   if (backend === "https") {
-    const { buffer, contentDisposition } = await httpsGetBinary(url, h, timeoutMs);
-    return { buffer, contentDisposition, via: "node:https" };
+    const { buffer, contentDisposition, contentType } = await httpsGetBinary(url, h, timeoutMs);
+    return { buffer, contentDisposition, contentType, via: "node:https" };
   }
   if (backend === "fetch") {
-    const { buffer, contentDisposition } = await fetchBinaryFetch(url, h, timeoutMs);
-    return { buffer, contentDisposition, via: "fetch" };
+    const { buffer, contentDisposition, contentType } = await fetchBinaryFetch(url, h, timeoutMs);
+    return { buffer, contentDisposition, contentType, via: "fetch" };
   }
 
   try {
-    const { buffer, contentDisposition } = await fetchBinaryFetch(url, h, timeoutMs);
-    return { buffer, contentDisposition, via: "fetch" };
+    const { buffer, contentDisposition, contentType } = await fetchBinaryFetch(url, h, timeoutMs);
+    return { buffer, contentDisposition, contentType, via: "fetch" };
   } catch {
     /* try next */
   }
   try {
-    const { buffer, contentDisposition } = await httpsGetBinary(url, h, timeoutMs);
-    return { buffer, contentDisposition, via: "node:https" };
+    const { buffer, contentDisposition, contentType } = await httpsGetBinary(url, h, timeoutMs);
+    return { buffer, contentDisposition, contentType, via: "node:https" };
   } catch {
     /* try next */
   }
   if (process.platform === "win32" && process.env.LENA_ICETRADE_NO_POWERSHELL_FALLBACK !== "1") {
     try {
-      const { buffer, contentDisposition } = await downloadBinaryPowerShell(url, timeoutMs);
-      return { buffer, contentDisposition, via: "powershell" };
+      const { buffer, contentDisposition, contentType } = await downloadBinaryPowerShell(url, timeoutMs);
+      return { buffer, contentDisposition, contentType, via: "powershell" };
     } catch {
       /* try next */
     }
   }
-  const { buffer, contentDisposition } = await downloadBinaryCurl(url, h, timeoutMs);
-  return { buffer, contentDisposition, via: "curl" };
+  const { buffer, contentDisposition, contentType } = await downloadBinaryCurl(url, h, timeoutMs);
+  return { buffer, contentDisposition, contentType, via: "curl" };
 }

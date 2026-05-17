@@ -192,7 +192,7 @@ def main() -> int:
     parser.add_argument("view_id", help="номер view (например 1336336)")
     parser.add_argument("--json", action="store_true", help="только JSON в stdout")
     parser.add_argument("--http-only", action="store_true", help="только GET httpx, без браузера")
-    parser.add_argument("--storage", help="Playwright storage_state.json после входа в ЛК")
+    parser.add_argument("--storage", help="Playwright storage_state.json (куки с карточки в Chromium)")
     parser.add_argument("--timeout-ms", type=int, default=25_000)
     parser.add_argument("--settle-ms", type=int, default=6_000)
     parser.add_argument("--headed", action="store_true", help="показать окно Chromium")

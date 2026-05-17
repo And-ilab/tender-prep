@@ -1,12 +1,12 @@
 # Отладка IceTrade вручную (DevTools + консоль)
 
-Используйте, когда бот даёт **0 файлов**: так вы увидите, где реально лежат ссылки (DOM, XHR, только после входа).
+Используйте, когда бот даёт **0 файлов**: так вы увидите, где реально лежат ссылки (DOM, XHR).
 
 ## 1. Откройте карточку
 
-Например: `https://icetrade.by/tenders/all/view/1336336`
+Например: `https://icetrade.by/tenders/all/view/1336510`
 
-Войдите в ЛК **если** без входа вложений не видно.
+Войдите в ЛК только если **ваша** карточка без входа не показывает вложения (многие закупки публичны).
 
 ## 2. Вкладка **Network** (Сеть)
 
@@ -47,6 +47,6 @@ LENA_ICETRADE_COOKIE=имя1=значение1; имя2=значение2
 ## 6. Playwright `storage` и Python
 
 - Путь в **`LENA_ICETRADE_PLAYWRIGHT_STORAGE`** должен указывать на **существующий** JSON; иначе бот работает без ЛК и пишет предупреждение.
-- Создание файла: `npm run icetrade:playwright-auth -- C:\secrets\icetrade-storage.json`
+- Создание файла: `npm run icetrade:playwright-auth -- C:\secrets\icetrade-storage.json https://icetrade.by/tenders/all/view/1336510`
 - `No module named 'playwright'` в Python: из каталога `scripts/icetrade_fetch` выполните  
   `py -3 -m pip install -r requirements.txt` и `py -3 -m playwright install chromium`

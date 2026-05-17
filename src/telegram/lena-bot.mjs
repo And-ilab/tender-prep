@@ -46,6 +46,16 @@ function loadEnvFile() {
 
 loadEnvFile();
 
+function tenderPrepVersion() {
+  try {
+    const p = join(process.cwd(), "package.json");
+    const j = JSON.parse(readFileSync(p, "utf8"));
+    return typeof j.version === "string" ? j.version : "?";
+  } catch {
+    return "?";
+  }
+}
+
 import { assertCredentialsFile } from "../drive/config.js";
 import { resolveDriveId } from "../drive/ids.js";
 import { chatCompletion, isLlmConfigured } from "../llm/openaiCompatible.js";
@@ -65,6 +75,11 @@ import {
   formatIceTradeAnalysisForTelegram,
 } from "../icetrade/analyzeAfterBootstrap.js";
 import { bootstrapIceTradeToDrive } from "../icetrade/bootstrapDrive.js";
+import { extractTenderInputDocumentsToExtracted } from "../icetrade/inputDocumentsExtract.js";
+import {
+  buildTenderTelegramCard,
+  formatTenderTelegramCardForTelegram,
+} from "../icetrade/tenderTelegramCard.js";
 import { extractIceTradeViewIds } from "../icetrade/viewIds.js";
 
 /** Сжатый дефолт для смоук-тестов; полные правила — docs/LENA_RULES.md. Переопределение: LENA_LLM_SYSTEM_PROMPT. */
@@ -259,6 +274,18 @@ function groupAskHasProcurementContext(text, msg) {
   return false;
 }
 
+/** Парсинг inputs → extracted после bootstrap. LENA_TELEGRAM_EXTRACT_AFTER_BOOTSTRAP=1 */
+function telegramExtractAfterBootstrapEnabled() {
+  const v = process.env.LENA_TELEGRAM_EXTRACT_AFTER_BOOTSTRAP?.trim().toLowerCase() ?? "";
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
+/** Карточка (LLM) после bootstrap — только по уже извлечённому тексту; либо включите шаг парсинга выше. LENA_TELEGRAM_CARD_AFTER_BOOTSTRAP=1 */
+function telegramCardAfterBootstrapEnabled() {
+  const v = process.env.LENA_TELEGRAM_CARD_AFTER_BOOTSTRAP?.trim().toLowerCase() ?? "";
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
 /** Анализ комплекта после IceTrade bootstrap. Отключить: LENA_ICETRADE_ANALYZE=0|false|no|off */
 function icetradeAnalyzeEnabled() {
   const v = process.env.LENA_ICETRADE_ANALYZE?.trim().toLowerCase() ?? "";
@@ -302,6 +329,28 @@ function shortenIceTradeBootstrapError(err) {
   }
   if (s.length > 380) return `${s.slice(0, 380)}…`;
   return s;
+}
+
+/**
+ * Что проверить в `.env`, если с IceTrade не скачались вложения (HTML вместо PDF и т.п.).
+ * @param {{ uploaded: unknown[], candidateUrls: unknown[], cardFetchVia?: string }} r
+ */
+function iceTradeSessionEnvHint(r) {
+  const lines = [
+    "**Если вложения не качаются (в т.ч. «HTML вместо PDF» в предупреждениях):**",
+    "• Опционально **как у браузера**: **LENA_ICETRADE_COOKIE** (заголовок Cookie из DevTools) или **LENA_ICETRADE_PLAYWRIGHT_STORAGE** после `npm run icetrade:playwright-auth` — помогает, если площадка режет «голый» fetch. ЛК для публичных карточек обычно не обязателен.",
+  ];
+  lines.push("• Тяжёлая карточка IceTrade: **LENA_ICETRADE_PLAYWRIGHT=1** и `npx playwright install chromium` (перезапуск бота после смены `.env`).");
+  if (r.cardFetchVia === "playwright") {
+    lines.push(
+      "• Уже идёт Playwright; если файлы всё равно не бинарники — увеличьте **LENA_ICETRADE_PLAYWRIGHT_DOWNLOAD_PRIME_MS**, **LENA_ICETRADE_FETCH_TIMEOUT_MS**, **LENA_ICETRADE_PLAYWRIGHT_SETTLE_MS**; при необходимости снимите **Cookie** из браузера или обновите **STORAGE**.",
+    );
+  } else {
+    lines.push(
+      "• Сейчас карточка **без** Playwright — для подгрузки документов включите **LENA_ICETRADE_PLAYWRIGHT=1**, затем снова пришлите ссылку.",
+    );
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -354,13 +403,18 @@ async function handlePlainMention(chatId, replyTo, text, chatType, msg) {
       await sendText(
         chatId,
         replyTo,
-        `IceTrade **${first}**: создаю папку тендера на Drive и пробую скачать вложения в **inputs** (документы заказчика)…`,
+        `IceTrade **${first}**: создаю папку тендера на Drive, сохраняю **inputs/icetrade-import-snapshot.json** (поля карточки и события) и пробую скачать вложения в **inputs**…`,
       );
       const r = await bootstrapIceTradeToDrive(rootId, text, {});
       const noteName =
         r.noteFile && typeof r.noteFile === "object" && r.noteFile !== null && "name" in r.noteFile
           ? String(/** @type {{ name?: string }} */ (r.noteFile).name ?? "")
           : "";
+      const snapFile = r.importSnapshotFile;
+      const snapMeta =
+        snapFile && typeof snapFile === "object" && snapFile !== null && "name" in snapFile
+          ? /** @type {{ name?: string; webViewLink?: string }} */ (snapFile)
+          : null;
       const driveSaQuota = errorsIndicateDriveServiceAccountQuota(r.errors);
       const errTail = formatIceTradeErrorsForTelegram(r.errors);
 
@@ -383,32 +437,77 @@ async function handlePlainMention(chatId, replyTo, text, chatType, msg) {
         analysisTail += `\n\n_Блок «анализ» выше опирается на **inputs** на Drive; пока **403 SA**, там пусто — после **Shared drive** пришлите ссылку снова._`;
       }
 
+      let extractTail = "";
+      if (telegramExtractAfterBootstrapEnabled() && r.uploaded.length > 0) {
+        try {
+          const ex = await extractTenderInputDocumentsToExtracted(rootId, r.viewId, {});
+          const okN = ex.items.filter((i) => i.chars > 0 && !i.error).length;
+          const modeHint =
+            ex.mode === "native_only"
+              ? "Режим **native_only**: **inputs/extracted/** не создана; статусы → **`tender-pipeline-state.json`** в корне тендера."
+              : "Режим **extracted_workspace**: тексты в **inputs/extracted/**; **`extract-manifest.json`** + **`tender-pipeline-state.json`**.";
+          extractTail = `\n\n**Парсинг inputs:** с текстом **${okN}** / ${ex.items.length}. ${modeHint}`;
+        } catch (ee) {
+          extractTail = `\n\n**Парсинг inputs:** ошибка — ${(ee instanceof Error ? ee.message : String(ee)).slice(0, 500)}`;
+        }
+      }
+
+      let cardTail = "";
+      if (telegramCardAfterBootstrapEnabled() && isLlmConfigured() && r.uploaded.length > 0) {
+        try {
+          const cr = await buildTenderTelegramCard(rootId, r.viewId, { runExtract: false });
+          cardTail = `\n\n---\n\n${formatTenderTelegramCardForTelegram(cr)}`;
+          if (cr.ok && cr.noteFile?.name) {
+            cardTail += `\n\nКарточка в **notes**: \`${cr.noteFile.name}\``;
+          }
+          if (cr.ok && cr.noteUploadError) {
+            cardTail += `\n\n_(Заметка на Drive: ${String(cr.noteUploadError).slice(0, 400)})_`;
+          }
+        } catch (ce) {
+          const msg = ce instanceof Error ? ce.message : String(ce);
+          cardTail = `\n\n_(Карточка тендера: ${msg.slice(0, 500)})_`;
+        }
+      }
+
       const lines = [
         `Готово: закупка **${r.viewId}** на Drive (**tender_id** = номер на IceTrade).`,
         "",
+        ...(r.tenderRootWebViewLink ? [`**Папка тендера (Google Drive):** ${r.tenderRootWebViewLink}`] : []),
+        ...(r.inputsFolderWebViewLink ? [`**Документы заказчика (папка inputs):** ${r.inputsFolderWebViewLink}`] : []),
+        ...(r.tenderRootWebViewLink || r.inputsFolderWebViewLink ? [""] : []),
         `**Карточка (HTML):** ${r.cardFetchVia ? `получена через **${r.cardFetchVia}**` : "—"}.`,
         "",
         `**inputs:** загружено файлов — **${r.uploaded.length}**${r.uploaded.length ? `: ${r.uploaded.map((x) => x.name).join(", ")}` : ""}.`,
+        snapMeta?.name
+          ? `**Снимок импорта:** \`inputs/${snapMeta.name}\`${snapMeta.webViewLink ? ` — ${snapMeta.webViewLink}` : ""}.`
+          : "_**Снимок импорта** (`inputs/icetrade-import-snapshot.json`): не удалось подтвердить загрузку — см. предупреждения ниже._",
         r.uploaded.length === 0 && r.candidateUrls.length === 0
           ? [
-              "На HTML-карточке не нашлось прямых ссылок (часто вложения подгружаются скриптами или только после входа в ЛК). Положите комплект в **inputs** вручную.",
+              "На HTML-карточке не нашлось прямых ссылок (часто вложения только в DOM/XHR или рендер Playwright). Положите комплект в **inputs** вручную при необходимости.",
               r.cardFetchVia === "playwright"
-                ? "_(Playwright уже был: попробуйте **LENA_ICETRADE_PLAYWRIGHT_STORAGE** после `npm run icetrade:playwright-auth` и увеличьте **LENA_ICETRADE_PLAYWRIGHT_SETTLE_MS**.)_"
+                ? iceTradeSessionEnvHint(r)
                 : "_(Для Chromium: **LENA_ICETRADE_PLAYWRIGHT=1** в `.env` и перезапуск бота; значения **LENA_…** и **GOOGLE_DRIVE_…** из `.env` теперь перебивают переменные Windows.)_",
-            ].join("\n")
+            ]
+              .filter((x) => x && String(x).trim())
+              .join("\n\n")
           : r.uploaded.length === 0 && driveSaQuota && r.candidateUrls.length > 0
             ? "Вложения с площадки **распознаны** (есть прямые ссылки), но **Google Drive не принял загрузку**: у сервисного аккаунта **нет квоты** на текущий корень. Перенесите **LENA_DRIVE_ROOT** на **общий диск (Shared drive)** и добавьте ключ SA участником — см. **docs/GOOGLE_DRIVE.md**."
             : r.uploaded.length === 0
-              ? "Ссылки-кандидаты есть, но автоматически скачать не получилось — см. заметку в **notes** и при необходимости скачайте вручную."
+              ? [
+                  "Ссылки-кандидаты есть, но автоматически скачать не получилось — см. заметку в **notes** и при необходимости скачайте вручную.",
+                  iceTradeSessionEnvHint(r),
+                ].join("\n\n")
               : "",
         "",
         noteName
           ? `В **notes**: \`${noteName}\` — список того, что **нужно запросить у менеджера** (Лена не подготовит сама без этих данных/файлов).`
           : `В **notes** добавлена заметка bootstrap с чеклистом для менеджера.`,
         "",
-        `Дальше: **/tenderask ${r.viewId}** … или **/bundle ${r.viewId}**.`,
+        `Дальше: **/tenderextract ${r.viewId}** (если добавите файлы — повторить), **/tendercard ${r.viewId}** (карточка по тексту из inputs или **inputs/extracted**), **/tenderask** … или **/bundle**.`,
         errTail,
         analysisTail,
+        extractTail,
+        cardTail,
       ].filter(Boolean);
       await sendTextChunks(chatId, replyTo, lines.join("\n"));
     } catch (e) {
@@ -710,6 +809,85 @@ async function cmdBundle(chatId, replyTo, args) {
   await sendJsonFile(chatId, replyTo, safeName, { ok: true, bundle });
 }
 
+async function cmdTenderExtract(chatId, replyTo, args) {
+  const parsed = parseBundleOpts(args);
+  if (!parsed) {
+    await sendText(
+      chatId,
+      replyTo,
+      "Использование: /tenderextract <tender_id> [ГГГГ|flat]\nПарсинг **inputs/**: если есть PDF/DOC/Google-файлы — текст в **inputs/extracted/**; если только «нативный» текст — **extracted** не создаётся. Статус → **tender-pipeline-state.json** в корне тендера. Без LLM.",
+    );
+    return;
+  }
+  assertCredentialsFile();
+  await sendText(chatId, replyTo, `Парсинг **${parsed.tenderId}**: сканирую **inputs/** …`);
+  try {
+    const ex = await extractTenderInputDocumentsToExtracted(rootId, parsed.tenderId, parsed.opts);
+    const okN = ex.items.filter((i) => i.chars > 0 && !i.error).length;
+    const failN = ex.items.filter((i) => i.error).length;
+    const modeLine =
+      ex.mode === "native_only"
+        ? "**Режим:** **native_only** — **inputs/extracted/** не создана (достаточно текста в **inputs**)."
+        : "**Режим:** **extracted_workspace** — см. **inputs/extracted/** и **extract-manifest.json**.";
+    await sendTextChunks(
+      chatId,
+      replyTo,
+      [
+        `**Готово.** С текстом: **${okN}** / ${ex.items.length} файл(ов).`,
+        modeLine,
+        `Сводка и статусы: **\`tender-pipeline-state.json\`** в корне папки тендера на Drive.`,
+        failN ? `Ошибки по файлам: **${failN}** (поля **error** в состоянии парсинга / во **extract-manifest.json** при режиме extracted).` : "",
+        "",
+        "Дальше: **/tendercard** …",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    );
+  } catch (e) {
+    const err = e instanceof Error ? e.message : String(e);
+    await sendText(chatId, replyTo, `Парсинг: ошибка — ${err.slice(0, 3500)}`);
+  }
+}
+
+async function cmdTenderCard(chatId, replyTo, args) {
+  const parsed = parseBundleOpts(args);
+  if (!parsed) {
+    await sendText(
+      chatId,
+      replyTo,
+      "Использование: /tendercard <tender_id> [ГГГГ|flat]\nНужен текст в **inputs/** (нативный) или в **inputs/extracted/** после **/tenderextract**. Опционально: **LENA_TENDER_CARD_RUN_EXTRACT=1** или `tender-card --extract` — сначала парсинг.",
+    );
+    return;
+  }
+  assertCredentialsFile();
+  if (!isLlmConfigured()) {
+    await sendText(chatId, replyTo, "Нужен OPENAI_API_KEY или LENA_OPENAI_API_KEY для карточки.");
+    return;
+  }
+  await sendText(
+    chatId,
+    replyTo,
+    `Карточка **${parsed.tenderId}**: текст из **inputs/** или **inputs/extracted** + HTML IceTrade → LLM…`,
+  );
+  try {
+    const cr = await buildTenderTelegramCard(rootId, parsed.tenderId, {
+      ...parsed.opts,
+      runExtract: false,
+    });
+    let msg = formatTenderTelegramCardForTelegram(cr);
+    if (cr.ok && cr.noteFile?.name) {
+      msg += `\n\n**notes:** \`${cr.noteFile.name}\``;
+    }
+    if (cr.ok && cr.noteUploadError) {
+      msg += `\n\n_(Запись заметки: ${String(cr.noteUploadError).slice(0, 500)})_`;
+    }
+    await sendTextChunks(chatId, replyTo, msg);
+  } catch (e) {
+    const err = e instanceof Error ? e.message : String(e);
+    await sendText(chatId, replyTo, `Карточка: ошибка — ${err.slice(0, 3500)}`);
+  }
+}
+
 async function cmdProduct(chatId, replyTo) {
   await sendTextChunks(chatId, replyTo, PRODUCT_CONTEXT_NOTE);
 }
@@ -724,7 +902,7 @@ async function cmdHelp(chatId, replyTo) {
       : "RAG: не задан LENA_RAG_INDEX_DIR — /archivesearch и /archiveask недоступны.";
   const llm = isLlmConfigured()
     ? "LLM: задан ключ (OPENAI_API_KEY или LENA_OPENAI_API_KEY)."
-    : "LLM: ключ не задан — /ask, /tenderask и /archiveask недоступны.";
+    : "LLM: ключ не задан — /ask, /tenderask, /tendercard и /archiveask недоступны.";
   await sendText(
     chatId,
     replyTo,
@@ -742,6 +920,8 @@ async function cmdHelp(chatId, replyTo) {
       "/archivesearch (или /searcharchive) … [число] — поиск по локальному RAG-архиву (фрагменты + пути; см. LENA_RAG_INDEX_DIR и эмбеддинги).",
       "/archiveask (или /askarchive) … [число] — тот же поиск + ответ LLM по найденным отрывкам (нужен ключ LLM и сервер эмбеддингов).",
       "/tenderask <tender_id> [ГГГГ|flat] …вопрос — бандл с явным tender_id + вопрос модели",
+      "/tenderextract <tender_id> [ГГГГ|flat] — парсинг **inputs/** (при необходимости **inputs/extracted**; статус **tender-pipeline-state.json**)",
+      "/tendercard <tender_id> [ГГГГ|flat] — карточка: текст из **inputs/** или **inputs/extracted** + HTML IceTrade + LLM",
       "/newchat — сбросить память для /ask в этом чате",
       "/product — цель продукта (IceTrade, Drive, политика RAG-корпуса)",
       "/help — это сообщение",
@@ -1109,6 +1289,7 @@ async function main() {
   }
 
   const un = rawUsername ?? "?";
+  console.error(`tender-prep v${tenderPrepVersion()}`);
   console.error(`Лена-бот: @${un}, корень Drive: ${rootId}`);
   const rd = resolvedRagIndexDir();
   if (rd) {
@@ -1301,6 +1482,12 @@ async function main() {
             break;
           case "tenderask":
             await cmdTenderAsk(chatId, replyTo, parsed.rest);
+            break;
+          case "tendercard":
+            await cmdTenderCard(chatId, replyTo, parsed.args);
+            break;
+          case "tenderextract":
+            await cmdTenderExtract(chatId, replyTo, parsed.args);
             break;
           case "ingest":
             await cmdIngest(chatId, replyTo, parsed.rest);
