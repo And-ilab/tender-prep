@@ -603,7 +603,25 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
             if (buffer.byteLength > maxBytes) throw new Error(`Файл слишком большой (${buffer.byteLength} байт)`);
             const baseName = resolveDownloadFileName(fileUrl, item.linkText, contentDisposition);
             const v = validateAttachmentBuffer(buffer, baseName, contentType, fileUrl);
-            if (!v.ok) throw new Error(v.reason);
+            if (!v.ok) {
+              // #region agent log
+              _dbgAgentLog(
+                "bootstrapDrive.js:pw-validate-fail",
+                "playwright download rejected by validateAttachmentBuffer",
+                {
+                  runId: "post-fix-v2",
+                  viewId,
+                  fileUrl,
+                  baseName,
+                  contentType,
+                  reason: v.reason,
+                  bufferKind: buffer.subarray(0, 4).toString("hex"),
+                },
+                "H11",
+              );
+              // #endregion
+              throw new Error(v.reason);
+            }
             const dlPath = join(tmpRoot, `pw-${Date.now()}-${baseName}`);
             await writeFile(dlPath, buffer);
             const uploadedOk = await consumeTempFileToInputs({

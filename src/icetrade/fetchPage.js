@@ -441,12 +441,14 @@ export function validateAttachmentBuffer(buffer, fileName, contentType, fileUrl)
   if (!buffer || buffer.length < 16) {
     return { ok: false, reason: "пустой или слишком короткий ответ" };
   }
-  const urlLow = (fileUrl || "").toLowerCase();
-  const expectPdf =
-    low.endsWith(".pdf") ||
-    urlLow.includes("/getfile") ||
-    /[?&]f=detail\b/i.test(urlLow);
-  if (expectPdf && kind !== "pdf") {
+  // Office / архивы: getFile на IceTrade часто отдаёт docx (PK), не PDF — не требовать %PDF по URL.
+  if (/\.docx$/i.test(low) && kind === "zip") return { ok: true };
+  if (/\.doc$/i.test(low) && (kind === "doc" || kind === "zip")) return { ok: true };
+  if (/\.xlsx$/i.test(low) && kind === "zip") return { ok: true };
+  if (/\.pptx$/i.test(low) && kind === "zip") return { ok: true };
+  if (/\.zip$/i.test(low) && kind === "zip") return { ok: true };
+
+  if (low.endsWith(".pdf")) {
     const sig = buffer.subarray(0, 5).toString("latin1");
     if (!sig.startsWith("%PDF")) {
       const head = buffer
