@@ -102,6 +102,9 @@ if (-not $ok) {
   Show-LogTail -Path $errLog
   Show-LogTail -Path $outLog
   Write-Host ""
+  Write-Host "Running probe-bot-start.ps1 ..."
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "probe-bot-start.ps1") -RepoRoot $RepoRoot
+  Write-Host ""
   Write-Host "Try: cd $RepoRoot\scripts\lena-server; .\install-service-nssm.ps1"
   Write-Host "Or: .\diagnose-windows.ps1"
   exit 1
