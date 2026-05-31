@@ -27,7 +27,7 @@ New-Item -ItemType Directory -Force -Path $BrowsersPath, $DownloadsPath | Out-Nu
 
 $needInstall = -not (Test-ChromiumInPath -Base $BrowsersPath)
 if ($needInstall) {
-  Write-Host "Playwright Chromium not found in $BrowsersPath — installing..."
+  Write-Host "Playwright Chromium not found in $BrowsersPath - installing..."
   $env:PLAYWRIGHT_BROWSERS_PATH = $BrowsersPath
   npm install 2>$null
   if ($LASTEXITCODE -ne 0) { npm install }

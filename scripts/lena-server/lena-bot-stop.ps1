@@ -5,12 +5,18 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+$script:LenaBotCmdNeedle = "lena-bot.mjs"
+
+function Test-IsLenaBotNodeProcess {
+  param([string]$CommandLine)
+  return ($CommandLine -and $CommandLine -like "*$script:LenaBotCmdNeedle*")
+}
 
 function Stop-LenaBotNodeProcesses {
   $stopped = [System.Collections.Generic.HashSet[int]]::new()
   for ($round = 0; $round -lt 12; $round++) {
     $procs = @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue |
-      Where-Object { $_.CommandLine -and $_.CommandLine -match 'lena-bot\.mjs' })
+      Where-Object { Test-IsLenaBotNodeProcess $_.CommandLine })
     if (-not $procs -or $procs.Count -eq 0) { break }
     foreach ($p in $procs) {
       $procId = [int]$p.ProcessId
@@ -20,7 +26,7 @@ function Stop-LenaBotNodeProcesses {
         [void]$stopped.Add($procId)
         Write-Host "Stopped node PID $procId"
       } catch {
-        Write-Host "WARN: could not stop PID $procId — запустите PowerShell от администратора"
+        Write-Host "WARN: could not stop PID $procId (run PowerShell as Administrator)"
       }
     }
     Start-Sleep -Milliseconds 800
@@ -78,7 +84,7 @@ function Clear-TelegramWebhook {
 
 function Test-LenaBotStillRunning {
   $left = Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -and $_.CommandLine -match 'lena-bot\.mjs' }
+    Where-Object { Test-IsLenaBotNodeProcess $_.CommandLine }
   return ($null -ne $left -and @($left).Count -gt 0)
 }
 
