@@ -2,6 +2,8 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
+echo === tender-prep: deploy + service restart ===
+
 net session >nul 2>&1
 if errorlevel 1 (
   echo [Ошибка] Запустите от имени Администратора.
@@ -45,7 +47,6 @@ if "%LOCAL%"=="%REMOTE%" (
     echo [Ошибка] npm install
     pause
     exit /b 1
-  )
   )
 )
 
