@@ -1,0 +1,43 @@
+# Автодеплой на сервер Лены после push в main.
+# Настройка: scripts/lena-server/README.md § «Автодеплой (GitHub Actions)».
+
+name: Deploy Lena server
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-lena-server
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH (Windows)
+        if: vars.LENA_DEPLOY_OS != 'linux'
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.LENA_DEPLOY_HOST }}
+          username: ${{ secrets.LENA_DEPLOY_USER }}
+          key: ${{ secrets.LENA_DEPLOY_SSH_KEY }}
+          port: ${{ secrets.LENA_DEPLOY_PORT || 22 }}
+          command_timeout: 30m
+          script_stop: true
+          script: powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${{ secrets.LENA_DEPLOY_PATH }}/scripts/lena-server/deploy-from-main.ps1" -RepoRoot "${{ secrets.LENA_DEPLOY_PATH }}"
+
+      - name: Deploy via SSH (Linux)
+        if: vars.LENA_DEPLOY_OS == 'linux'
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.LENA_DEPLOY_HOST }}
+          username: ${{ secrets.LENA_DEPLOY_USER }}
+          key: ${{ secrets.LENA_DEPLOY_SSH_KEY }}
+          port: ${{ secrets.LENA_DEPLOY_PORT || 22 }}
+          command_timeout: 30m
+          script_stop: true
+          script: |
+            chmod +x "${{ secrets.LENA_DEPLOY_PATH }}/scripts/lena-server/deploy-from-main.sh"
+            "${{ secrets.LENA_DEPLOY_PATH }}/scripts/lena-server/deploy-from-main.sh" main
