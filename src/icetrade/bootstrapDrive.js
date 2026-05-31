@@ -11,6 +11,7 @@ import {
   fetchIceTradeCardHtmlPlaywright,
   iceTradePlaywrightEnabled,
   playwrightChromiumLikelyInstalled,
+  ensurePlaywrightBrowsersPathEnv,
   withPlaywrightIceTradeDownloadBatch,
 } from "./fetchPageRendered.js";
 import { iceTradePythonFetchMode, runPythonIceTradeFetch } from "./bootstrapPythonSidecar.js";
@@ -35,7 +36,9 @@ function _dbgAgentLog(location, message, data, hypothesisId) {
     headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "65c8b6" },
     body: JSON.stringify(payload),
   }).catch(() => {});
-  appendFile(join(process.cwd(), "debug-65c8b6.log"), `${JSON.stringify(payload)}\n`).catch(() => {});
+  const line = `${JSON.stringify(payload)}\n`;
+  appendFile(join(process.cwd(), "debug-65c8b6.log"), line).catch(() => {});
+  appendFile(join(process.cwd(), "logs", "icetrade-bootstrap-debug.ndjson"), line).catch(() => {});
 }
 // #endregion
 
@@ -347,6 +350,7 @@ function buildBootstrapMarkdown(p) {
  */
 export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {}) {
   assertCredentialsFile();
+  ensurePlaywrightBrowsersPathEnv();
   const flat = opts.flat === true;
   const year = opts.year;
   const maxFiles =
@@ -544,14 +548,13 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
   const rawPwDl = process.env.LENA_ICETRADE_PLAYWRIGHT_FILE_DOWNLOAD?.trim().toLowerCase() ?? "";
   const usePwBatchDl =
     iceTradePlaywrightEnabled() &&
-    playwrightChromiumLikelyInstalled() &&
     rawPwDl !== "0" &&
     rawPwDl !== "false" &&
     rawPwDl !== "no" &&
     rawPwDl !== "off";
   if (iceTradePlaywrightEnabled() && !playwrightChromiumLikelyInstalled() && candidates.length > 0) {
     errors.push(
-      "Playwright включён, но **Chromium не найден** — скачивание вложений идёт через HTTP/PowerShell (см. **LENA_PLAYWRIGHT_BROWSERS_PATH**). На Windows для getFile пробуется **PowerShell WebSession** (карточка → файл), как в браузере.",
+      "Playwright включён, но **Chromium не найден** — запустите на сервере **scripts\\lena-server\\ensure-playwright-server.ps1** (или `lena-bot.bat` после обновления) и перезапустите службу. Без Chromium getFile отдаёт HTML, а не docx/pdf.",
     );
   }
 

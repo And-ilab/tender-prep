@@ -46,6 +46,13 @@ if "%LOCAL%"=="%REMOTE%" (
     pause
     exit /b 1
   )
+  )
+)
+
+echo === Playwright Chromium (служба SYSTEM) ===
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\lena-server\ensure-playwright-server.ps1" -RepoRoot "%CD%"
+if errorlevel 1 (
+  echo [Внимание] ensure-playwright-server.ps1 — см. вывод выше
 )
 
 echo === Перезапуск Лены ===
