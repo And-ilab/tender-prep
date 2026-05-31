@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, appendFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,6 +18,26 @@ import { extractAttachmentCandidates, isIceTradeLoginWallHtml, isIceTradePlatfor
 import { buildIceTradeImportSnapshot, importSnapshotToJson } from "./importPageMeta.js";
 
 const VIEW_PAGE = (/** @type {string} */ id) => `https://icetrade.by/tenders/all/view/${id}`;
+
+// #region agent log
+/** @param {string} location @param {string} message @param {Record<string, unknown>} data @param {string} hypothesisId */
+function _dbgAgentLog(location, message, data, hypothesisId) {
+  const payload = {
+    sessionId: "65c8b6",
+    location,
+    message,
+    data,
+    timestamp: Date.now(),
+    hypothesisId,
+  };
+  fetch("http://127.0.0.1:7273/ingest/0fbf9c34-aa58-4c41-8b66-36b66355e6e0", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "65c8b6" },
+    body: JSON.stringify(payload),
+  }).catch(() => {});
+  appendFile(join(process.cwd(), "debug-65c8b6.log"), `${JSON.stringify(payload)}\n`).catch(() => {});
+}
+// #endregion
 
 /**
  * Комплект на карточке IceTrade может вести и на файлы самой ЭТП (icetrade.by), и на выдачу с **goszakupki.by** (напр. /auction/get-file/…).
@@ -465,6 +485,20 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
       `**Playwright / сеть (Node):** накоплено **${networkFileUrls.length}** URL из XHR; кандидатов к скачиванию после фильтра — **${candidates.length}**.`,
     );
   }
+  // #region agent log
+  _dbgAgentLog(
+    "bootstrapDrive.js:candidates",
+    "attachment candidates ready",
+    {
+      viewId,
+      candidatesCount: candidates.length,
+      cardFetchVia: cardFetchVia ?? null,
+      networkFileUrlsCount: networkFileUrls.length,
+      sampleUrls: candidates.slice(0, 3).map((c) => c.url),
+    },
+    "H3",
+  );
+  // #endregion
   let inputChildren = await listChildren(inputsId);
   const existing = new Set(inputChildren.map((f) => f.name));
   /** @type {Set<string>} */
@@ -522,9 +556,30 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
   }
 
   let n = 0;
-  let usedPlaywrightFileBatch = false;
+
+  // #region agent log
+  _dbgAgentLog(
+    "bootstrapDrive.js:download-plan",
+    "download backends selected",
+    {
+      runId: "post-fix",
+      viewId,
+      usePwBatchDl,
+      playwrightEnabled: iceTradePlaywrightEnabled(),
+      chromiumLikelyInstalled: playwrightChromiumLikelyInstalled(),
+      platform: process.platform,
+      cwd: process.cwd(),
+      playwrightBrowsersPath: process.env.PLAYWRIGHT_BROWSERS_PATH?.trim() ?? null,
+      playwrightStorageSet: Boolean(process.env.LENA_ICETRADE_PLAYWRIGHT_STORAGE?.trim()),
+      candidatesCount: candidates.length,
+      existingInputsCount: existing.size,
+    },
+    "H2",
+  );
+  // #endregion
 
   if (usePwBatchDl && candidates.length > 0) {
+    const uploadedBeforePwBatch = uploaded.length;
     try {
       await withPlaywrightIceTradeDownloadBatch(
         timeoutMs,
@@ -568,15 +623,47 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
       },
         { viewId },
       );
-      usedPlaywrightFileBatch = true;
+      const pwUploadedDelta = uploaded.length - uploadedBeforePwBatch;
+      if (pwUploadedDelta === 0) {
+        errors.push(
+          "Playwright batch: **0** вложений загружено — пробуем PowerShell WebSession и HTTP по одному файлу.",
+        );
+      }
+      // #region agent log
+      _dbgAgentLog(
+        "bootstrapDrive.js:pw-batch-done",
+        "playwright batch finished without throw",
+        {
+          runId: "post-fix",
+          viewId,
+          uploadedBeforePwBatch,
+          uploadedAfterPwBatch: uploaded.length,
+          uploadedDelta: pwUploadedDelta,
+          nAfterPwBatch: n,
+        },
+        "H1",
+      );
+      // #endregion
     } catch (e) {
+      // #region agent log
+      _dbgAgentLog(
+        "bootstrapDrive.js:pw-batch-error",
+        "playwright batch threw",
+        {
+          runId: "post-fix",
+          viewId,
+          error: e instanceof Error ? e.message : String(e),
+        },
+        "H1",
+      );
+      // #endregion
       errors.push(
-        `Скачивание вложений через Playwright: ${e instanceof Error ? e.message : String(e)} — повтор обычным HTTP.`,
+        `Скачивание вложений через Playwright: ${e instanceof Error ? e.message : String(e)} — повтор PowerShell / HTTP.`,
       );
     }
   }
 
-  if (!usedPlaywrightFileBatch && candidates.length > 0 && process.platform === "win32") {
+  if (candidates.length > 0 && process.platform === "win32") {
     /** @type {{ id: string, url: string, fileName: string, linkText?: string }[]} */
     const batchItems = [];
     /** @type {Map<string, { url: string, linkText?: string }>} */
@@ -599,6 +686,18 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
       batchById.set(id, item);
     }
     if (batchItems.length > 0) {
+      // #region agent log
+      _dbgAgentLog(
+        "bootstrapDrive.js:ps-batch-start",
+        "powershell batch starting",
+        {
+          runId: "post-fix",
+          viewId,
+          batchItemsCount: batchItems.length,
+        },
+        "H4",
+      );
+      // #endregion
       try {
         const d = await mkdtemp(join(tmpRoot, "ps-batch-"));
         const h = icetradeFetchHeaders();
@@ -647,8 +746,34 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
         if (okCnt > 0) {
           errors.push(`**PowerShell batch (WebSession):** загружено **${okCnt}** из **${batchItems.length}** вложений.`);
         }
+        // #region agent log
+        _dbgAgentLog(
+          "bootstrapDrive.js:ps-batch-done",
+          "powershell batch finished",
+          {
+            runId: "post-fix",
+            viewId,
+            okCnt,
+            batchItemsCount: batchItems.length,
+            resultsCount: results.length,
+            psErrors: results.filter((r) => !r.ok).slice(0, 3).map((r) => r.error ?? "err"),
+          },
+          "H4",
+        );
+        // #endregion
         await rm(d, { recursive: true, force: true }).catch(() => {});
       } catch (e) {
+        // #region agent log
+        _dbgAgentLog(
+          "bootstrapDrive.js:ps-batch-error",
+          "powershell batch threw",
+          {
+            viewId,
+            error: e instanceof Error ? e.message : String(e),
+          },
+          "H4",
+        );
+        // #endregion
         errors.push(
           `PowerShell batch (WebSession): ${e instanceof Error ? e.message : String(e)} — пробуем по одному файлу.`,
         );
@@ -656,34 +781,32 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
     }
   }
 
-  if (!usedPlaywrightFileBatch) {
-    for (const item of candidates) {
-      const fileUrl = item.url;
-      if (n >= maxFiles) {
-        errors.push(`Достигнут лимит файлов (${maxFiles}), остальное пропущено.`);
-        break;
+  for (const item of candidates) {
+    const fileUrl = item.url;
+    if (n >= maxFiles) {
+      errors.push(`Достигнут лимит файлов (${maxFiles}), остальное пропущено.`);
+      break;
+    }
+    try {
+      const predicted = predictInputFileNameBeforeDownload(fileUrl, item.linkText);
+      if (shouldSkipDownloadExistingOnDrive(predicted, inputChildren, existing)) {
+        skippedExistingSet.add(predicted);
+        continue;
       }
-      try {
-        const predicted = predictInputFileNameBeforeDownload(fileUrl, item.linkText);
-        if (shouldSkipDownloadExistingOnDrive(predicted, inputChildren, existing)) {
-          skippedExistingSet.add(predicted);
-          continue;
-        }
-        if (n > 0 && betweenFiles > 0) await sleepMs(betweenFiles);
-        const dl = await downloadExternalToTempWithRetry(fileUrl, tmpRoot, timeoutMs, pageUrl, item.linkText);
-        const uploadedOk = await consumeTempFileToInputs({
-          dl,
-          inputChildren,
-          existing,
-          inputsId,
-          uploaded,
-          errors,
-          skippedExistingSet,
-        });
-        if (uploadedOk) n += 1;
-      } catch (e) {
-        errors.push(`${fileUrl}: ${e instanceof Error ? e.message : String(e)}`);
-      }
+      if (n > 0 && betweenFiles > 0) await sleepMs(betweenFiles);
+      const dl = await downloadExternalToTempWithRetry(fileUrl, tmpRoot, timeoutMs, pageUrl, item.linkText);
+      const uploadedOk = await consumeTempFileToInputs({
+        dl,
+        inputChildren,
+        existing,
+        inputsId,
+        uploaded,
+        errors,
+        skippedExistingSet,
+      });
+      if (uploadedOk) n += 1;
+    } catch (e) {
+      errors.push(`${fileUrl}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -714,6 +837,24 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
   }
 
   await rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
+
+  // #region agent log
+  _dbgAgentLog(
+    "bootstrapDrive.js:final",
+    "bootstrap complete",
+    {
+      runId: "post-fix",
+      viewId,
+      uploadedCount: uploaded.length,
+      uploadedNames: uploaded.map((u) => u.name),
+      candidatesCount: candidates.length,
+      skippedExistingCount: skippedExistingOnDrive.length,
+      errorsCount: errors.length,
+      errorSamples: errors.slice(0, 5).map((e) => String(e).slice(0, 200)),
+    },
+    "H5",
+  );
+  // #endregion
 
   return {
     viewId,

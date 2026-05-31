@@ -149,6 +149,71 @@ npm install
 Restart-Service tender-prep-lena
 ```
 
+Или одной командой (то же, что делает CI после push в **main**):
+
+```powershell
+.\scripts\lena-server\deploy-from-main.ps1
+```
+
+Лог: `logs\deploy.log`.
+
+---
+
+## Автодеплой (GitHub Actions)
+
+После каждого **push в `main`** репозиторий может сам обновить сервер: `git fetch` → `main` = `origin/main` → `npm install` → перезапуск службы **tender-prep-lena**.
+
+Workflow: [`.github/workflows/deploy-lena-server.yml`](../../.github/workflows/deploy-lena-server.yml).
+
+**Пошаговая инструкция (Windows Server):** [DEPLOY_SETUP_WINDOWS.md](DEPLOY_SETUP_WINDOWS.md).
+
+### 1. Подготовка сервера (один раз)
+
+**Windows Server**
+
+1. **OpenSSH Server** — «Параметры → Приложения → Дополнительные компоненты → OpenSSH Server» или `Add-WindowsCapability OpenSSH.Server~~~~0.0.1.0`.
+2. Пользователь для деплоя (например `deploy`) с правом **перезапуска службы** `tender-prep-lena` (администратор или делегированное право).
+3. В `C:\Users\deploy\.ssh\authorized_keys` — **публичный** ключ, пара к которому ляжет в GitHub Secrets.
+4. Репозиторий уже клонирован в `C:\tender-prep`, ветка **main**, `git remote` указывает на GitHub. Для **приватного** repo на сервере: [deploy key](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys) или `git config credential.helper` — иначе `git fetch` из CI упадёт.
+
+Проверка вручную по SSH с ноута:
+
+```powershell
+ssh deploy@ВАШ_СЕРВЕР "powershell -NoProfile -ExecutionPolicy Bypass -File C:/tender-prep/scripts/lena-server/deploy-from-main.ps1 -NoRestart"
+```
+
+**Linux** — аналогично: SSH, clone, `./scripts/lena-server/deploy-from-main.sh`, unit `tender-prep-lena-bot`.
+
+### 2. Секреты в GitHub
+
+Репозиторий → **Settings → Secrets and variables → Actions → New repository secret**:
+
+| Secret | Пример | Назначение |
+|--------|--------|------------|
+| `LENA_DEPLOY_HOST` | `203.0.113.10` или `lena.example.com` | IP/hostname сервера |
+| `LENA_DEPLOY_USER` | `deploy` | SSH-пользователь |
+| `LENA_DEPLOY_SSH_KEY` | содержимое **приватного** ключа PEM | вход по SSH |
+| `LENA_DEPLOY_PATH` | `C:/tender-prep` | корень репозитория на сервере (слэши `/` даже на Windows) |
+| `LENA_DEPLOY_PORT` | `22` | опционально, если SSH не на 22 |
+
+**Variables** (Settings → Actions → Variables):
+
+| Variable | Значение |
+|----------|----------|
+| `LENA_DEPLOY_OS` | `windows` (по умолчанию, если не задано) или `linux` |
+
+### 3. Поведение
+
+1. Push в **main** → workflow **Deploy Lena server**.
+2. SSH на сервер → `deploy-from-main.ps1` / `deploy-from-main.sh`.
+3. Сервер: `git fetch origin main`, `git reset --hard origin/main` (локальные правки в репо **затираются** — секреты только в `.env` вне Git).
+4. `npm install`, `install-windows.ps1` (Playwright при деплое пропускается для скорости; полная установка — `install-windows.ps1` без `-SkipPlaywright`).
+5. `Restart-Service tender-prep-lena` (Windows) или `systemctl restart tender-prep-lena-bot` (Linux).
+
+Ручной запуск: **Actions → Deploy Lena server → Run workflow**.
+
+**Важно:** пока секреты не заданы, job упадёт на SSH — это нормально; локальный деплой через `deploy-from-main.ps1` работает без CI.
+
 ---
 
 ## Что переезжает на сервер
@@ -294,6 +359,8 @@ journalctl -u tender-prep-lena-bot -f
 Не запускайте одновременно `lena-bot.bat` на ноуте и службу на сервере.
 
 ## Обновление кода на сервере
+
+**Автоматически:** push в **main** + секреты GitHub Actions — см. раздел **«Автодеплой (GitHub Actions)»** выше.
 
 **Linux:**
 

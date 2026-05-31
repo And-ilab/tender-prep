@@ -8,7 +8,7 @@ $ErrorActionPreference = "Continue"
 
 function Stop-LenaBotNodeProcesses {
   $stopped = [System.Collections.Generic.HashSet[int]]::new()
-  for ($round = 0; $round -lt 8; $round++) {
+  for ($round = 0; $round -lt 12; $round++) {
     $procs = @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue |
       Where-Object { $_.CommandLine -and $_.CommandLine -match 'lena-bot\.mjs' })
     if (-not $procs -or $procs.Count -eq 0) { break }
@@ -18,12 +18,12 @@ function Stop-LenaBotNodeProcesses {
       try {
         Stop-Process -Id $procId -Force -ErrorAction Stop
         [void]$stopped.Add($procId)
-        Write-Host "Stopped PID $procId"
+        Write-Host "Stopped node PID $procId"
       } catch {
-        Write-Host "WARN: could not stop PID $procId"
+        Write-Host "WARN: could not stop PID $procId — запустите PowerShell от администратора"
       }
     }
-    Start-Sleep -Milliseconds 600
+    Start-Sleep -Milliseconds 800
   }
   return $stopped.Count
 }
@@ -32,10 +32,14 @@ function Stop-LenaWindowsService {
   $name = "tender-prep-lena"
   $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
   if (-not $svc) { return $false }
-  if ($svc.Status -eq "Running") {
+  if ($svc.Status -eq "Running" -or $svc.Status -eq "StartPending") {
     Write-Host "Stopping service $name..."
     Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
+    for ($i = 0; $i -lt 15; $i++) {
+      Start-Sleep -Milliseconds 400
+      $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+      if ($svc.Status -eq "Stopped") { break }
+    }
     return $true
   }
   return $false
@@ -78,8 +82,14 @@ function Test-LenaBotStillRunning {
   return ($null -ne $left -and @($left).Count -gt 0)
 }
 
+if ($ClearWebhook) { Clear-TelegramWebhook }
+
 $svcStopped = Stop-LenaWindowsService
+Start-Sleep -Seconds 1
 $n = Stop-LenaBotNodeProcesses
+Start-Sleep -Milliseconds 500
+
+if ($ClearWebhook) { Clear-TelegramWebhook }
 if ($n -eq 0 -and -not $svcStopped) {
   Write-Host "No lena-bot.mjs node processes found."
 }
@@ -89,5 +99,4 @@ if (Test-LenaBotStillRunning) {
   exit 2
 }
 
-if ($ClearWebhook) { Clear-TelegramWebhook }
 exit 0

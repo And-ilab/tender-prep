@@ -90,7 +90,11 @@ import {
   buildTenderTelegramCard,
   formatTenderTelegramCardForTelegram,
 } from "../icetrade/tenderTelegramCard.js";
-import { extractIceTradeViewIds } from "../icetrade/viewIds.js";
+import {
+  extractIceTradeViewIds,
+  iceTradeBootstrapShouldRun,
+  resolveIceTradeViewIdFromMessage,
+} from "../icetrade/viewIds.js";
 import {
   buildConversationReply,
   classifyConversationIntent,
@@ -118,6 +122,7 @@ const DEFAULT_LLM_SYSTEM = [
   "Переписка с менеджерами по тендеру (согласования, цены, условия) — веди контекстный лог на Drive: один файл notes/telegram-managers-log.md на тендер; после значимых реплик дополняй лог или выдай markdown-блок для вставки оператором.",
   "Документы заказчика: всё запрошенное и реально предоставимое должно быть в комплекте — иначе риск отклонения; рано помечай в матрице, чего нет и что нельзя подделать. Не трать силы на финальные тексты, завязанные на недоступный сертификат и т.п. Если требование выглядит принципиально неприменимым к предмету (пример: сертификат собственного производства при тендере на разработку ПО) — изложи гипотезу и запроси подтверждение у менеджера; письмо в тендерную комиссию за разъяснением не готовь и не инициируй автоматически, только после явного согласования человеком.",
   "Экономия токенов: сначала компактно — структура, матрица, что запросить у менеджера/куда загрузить файлы; длинные черновики разделов, которые завязаны на ещё не полученный документ (справка банка и т.д.), разворачивай после появления файла или текста в контексте, если только команда явно не просит полный черновик с заглушками.",
+  "Конвейер (docs/TENDER_PIPELINE.md) фиксирован — не менять: **Import** (ссылка IceTrade или номер → bootstrap, файлы в **inputs/**) → **Extract** (/tenderextract, **inputs/extracted/**) → **Card/Analyze** (notes/, матрица) → черновики в **drafts/**. Запрещено придумывать папки docs/, our-docs/ и сценарий «скопируйте тексты документов в чат» или «загрузите в docs/» — документы заказчика только через Import с IceTrade в **inputs/**.",
 ].join(" ");
 
 /** @type {Map<string, { role: "user" | "assistant", content: string }[]>} */
@@ -132,6 +137,14 @@ const PRODUCT_CONTEXT_NOTE = [
   "• /archivesearch и /archiveask — по уже собранному локальному индексу; документы новой закупки туда не подмешиваются автоматически.",
   "• В общий корпус для обучения системы имеет смысл добавлять материалы только после готового пакета на участие и явного решения команды (авто-триггер в боте — позже; сейчас индекс обновляют вручную на машине с корпусом).",
 ].join("\n");
+
+/** База для ссылок на docs/ в /help (переопределение: LENA_DOCS_REPO_URL). */
+const LENA_DOCS_REPO_BASE = (
+  process.env.LENA_DOCS_REPO_URL?.trim() || "https://github.com/And-ilab/tender-prep/blob/main"
+).replace(/\/+$/, "");
+
+const LENA_BUSINESS_PROCESS_DOC_URL = `${LENA_DOCS_REPO_BASE}/docs/USER_SHORT_RU.md`;
+const LENA_TENDER_PIPELINE_DOC_URL = `${LENA_DOCS_REPO_BASE}/docs/TENDER_PIPELINE.md`;
 
 const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
 const rootRaw = process.env.LENA_DRIVE_ROOT?.trim();
@@ -859,10 +872,10 @@ async function handleConversationTurn(chatId, replyTo, text) {
  * @returns {Promise<boolean>}
  */
 async function handleIceTradeBootstrap(chatId, replyTo, text) {
-  const ids = extractIceTradeViewIds(text);
-  if (ids.length === 0) return false;
+  const viewId = resolveIceTradeViewIdFromMessage(text);
+  if (!viewId) return false;
 
-  const first = ids[0];
+  const first = viewId;
   /** @type {number | undefined} */
   let progressMid;
   try {
@@ -911,8 +924,7 @@ async function handleIceTradeBootstrap(chatId, replyTo, text) {
  * @returns {Promise<boolean>}
  */
 async function handlePlainMention(chatId, replyTo, text, chatType, msg) {
-  const ids = extractIceTradeViewIds(text);
-  if (ids.length > 0) {
+  if (iceTradeBootstrapShouldRun(text)) {
     return handleIceTradeBootstrap(chatId, replyTo, text);
   }
 
@@ -2128,6 +2140,8 @@ async function cmdHelp(chatId, replyTo) {
     replyTo,
     [
       "Лена — команды:",
+      `Бизнес-процесс (стадии, роли, ожидания от менеджера): ${LENA_BUSINESS_PROCESS_DOC_URL}`,
+      `Конвейер шагов Import → Extract → … (артефакты на Drive): ${LENA_TENDER_PIPELINE_DOC_URL}`,
       "В группе бот видит все сообщения, кроме начинающихся с @ другого участника. Ссылка IceTrade (…/view/<номер>) — импорт в **inputs** на Drive. Парсинг — **«Анализ документов»** или **/tenderextract**. Расширенный режим: **LENA_TELEGRAM_ICETRADE_IMPORT_ONLY=0**.",
       "/templates — список файлов в _lena/templates (проверка бланка и др.)",
       "/library — _lena/library",
@@ -2635,8 +2649,7 @@ async function main() {
       }
       const parsed = parseCommand(bodyText);
       if (!parsed) {
-        const iceIds = extractIceTradeViewIds(bodyText);
-        if (iceIds.length > 0 && (t === "private" || isGroup)) {
+        if (iceTradeBootstrapShouldRun(bodyText) && (t === "private" || isGroup)) {
           try {
             const handledIce = await handleIceTradeBootstrap(chatId, replyTo, bodyText);
             if (handledIce) continue;
@@ -2652,6 +2665,16 @@ async function main() {
 
         const continueAskDialog = hasAskHistory && (t === "private" || isGroup);
         if (continueAskDialog) {
+          if (iceTradeBootstrapShouldRun(bodyText)) {
+            try {
+              const handledIce = await handleIceTradeBootstrap(chatId, replyTo, bodyText);
+              if (handledIce) continue;
+            } catch (e) {
+              const err = e instanceof Error ? e.message : String(e);
+              await sendText(chatId, replyTo, `Ошибка: ${err.slice(0, 3500)}`);
+              continue;
+            }
+          }
           if (isGroup && !groupAskHasProcurementContext(bodyText, msgForEntity)) {
             await sendText(chatId, replyTo, telegramTenderContextMissingHint());
             continue;
@@ -2676,6 +2699,16 @@ async function main() {
         }
         if (isLlmConfigured() && (t === "private" || isGroup)) {
           if (await handleConversationTurn(chatId, replyTo, bodyText)) continue;
+          if (iceTradeBootstrapShouldRun(bodyText)) {
+            try {
+              const handledIce = await handleIceTradeBootstrap(chatId, replyTo, bodyText);
+              if (handledIce) continue;
+            } catch (e) {
+              const err = e instanceof Error ? e.message : String(e);
+              await sendText(chatId, replyTo, `Ошибка: ${err.slice(0, 3500)}`);
+              continue;
+            }
+          }
           if (isGroup && !groupAskHasProcurementContext(bodyText, msgForEntity)) {
             await sendText(chatId, replyTo, telegramTenderContextMissingHint());
             continue;
