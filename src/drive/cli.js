@@ -37,7 +37,7 @@ function usage() {
       "  drive upload <folderUrlOrId> <localPath> [имяНаДиске]",
       "",
       "Рабочее пространство (_lena/ внутри вашей корневой папки на Диске):",
-      "  drive workspace-ensure <rootFolderUrlOrId>     — создать _lena: templates, library, context, org-docs, founding-docs, tenders",
+      "  drive workspace-ensure <rootFolderUrlOrId>     — создать _lena и подпапки компаний gs-retail, finselvat в templates, org-docs, founding-docs",
       "  drive workspace-layout <rootFolderUrlOrId>   — показать id папок (без создания)",
       "  drive workspace-tender <root> <tenderId> [ГГГГ|flat] — по умолчанию год = текущий (или LENA_DEFAULT_TENDER_YEAR); flat — путь без года",
       "  drive tenders-inventory <root>               — сводка всех папок тендеров: год, имя, число файлов в inputs/drafts/…",

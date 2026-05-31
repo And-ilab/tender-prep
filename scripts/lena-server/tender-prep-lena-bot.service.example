@@ -1,0 +1,34 @@
+# /etc/systemd/system/tender-prep-lena-bot.service
+#
+# sudo cp scripts/lena-server/tender-prep-lena-bot.service.example /etc/systemd/system/tender-prep-lena-bot.service
+# sudo nano /etc/systemd/system/tender-prep-lena-bot.service   # User, пути
+# sudo systemctl daemon-reload && sudo systemctl enable --now tender-prep-lena-bot
+# journalctl -u tender-prep-lena-bot -f
+
+[Unit]
+Description=tender-prep Telegram bot Lena
+Documentation=file:///opt/tender-prep/scripts/lena-server/README.md
+After=network-online.target
+Wants=network-online.target
+# Если RAG embeddings на этом же хосте:
+# After=tender-prep-embeddings.service
+# Requires=tender-prep-embeddings.service
+
+[Service]
+Type=simple
+User=tender
+Group=tender
+WorkingDirectory=/opt/tender-prep
+EnvironmentFile=-/opt/tender-prep/.env
+ExecStart=/usr/bin/node /opt/tender-prep/src/telegram/lena-bot.mjs
+Restart=on-failure
+RestartSec=15
+# Playwright / Chromium на некоторых VPS нужен больший лимит памяти:
+# MemoryMax=2G
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tender-prep-lena
+
+[Install]
+WantedBy=multi-user.target

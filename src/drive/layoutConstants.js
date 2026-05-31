@@ -3,11 +3,11 @@ export const LENA_ROOT_FOLDER = "_lena";
 
 /**
  * Подпапки под `_lena/` (латиница — меньше проблем с кодировками и API).
- * - templates — копируемые шаблоны заявок
+ * - templates — шаблоны заявок и бланки: внутри — подпапки **`gs-retail`**, **`finselvat`** под материалы соответствующего юрлица (плюс при необходимости файлы в корне `templates`)
  * - library — справочники, регламенты, выдержки (не обязательно «шаблоны на копирование»)
  * - context — общий контекст для Лены между тендерами
- * - org-docs — универсальные документы организации на все тендеры (справка банка со сроком, бух. баланс, ОФР и т.п.)
- * - founding-docs — учредительные и «редко меняющиеся» корпоративные документы (свидетельство о регистрации, устав, приказ о назначении директора и т.п.)
+ * - org-docs — документы организации на тендеры (справка банка, баланс, ОФР): внутри — **подпапки по юрлицу** (`gs-retail`, `finselvat`), см. `LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG`
+ * - founding-docs — учредительные и редко меняющиеся документы: те же **подпапки по компании** внутри каталога
  * - tenders — закупки: по умолчанию `_lena/tenders/<ГГГГ>/<tender_id>/…` (год = `LENA_DEFAULT_TENDER_YEAR` или текущий календарный); режим `flat` — без года в пути
  */
 export const LENA_SUB = {
@@ -18,6 +18,32 @@ export const LENA_SUB = {
   foundingDocs: "founding-docs",
   tenders: "tenders",
 };
+
+/**
+ * Подпапки юрлиц на Drive внутри `_lena/templates`, `_lena/org-docs`, `_lena/founding-docs` (вариант A).
+ * Ключ = `offerOrg` из Telegram (`/tenderkp`). Значение = имя каталога (латиница).
+ * @type {Record<"gs_retail" | "finselvat", string>}
+ */
+export const LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG = {
+  gs_retail: "gs-retail",
+  finselvat: "finselvat",
+};
+
+/**
+ * Уникальные имена подпапок компаний (для `workspace-ensure`).
+ * @returns {string[]}
+ */
+export function lenaCompanyDriveSubfolderNames() {
+  return [...new Set(Object.values(LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG))];
+}
+
+/**
+ * @param {string} offerOrgKey
+ * @returns {string | undefined}
+ */
+export function lenaCompanyFolderName(offerOrgKey) {
+  return LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG[/** @type {"gs_retail" | "finselvat"} */ (offerOrgKey)];
+}
 
 /** Внутри каждого тендера (после опционального `tenders/<YYYY>/`).
  * `inputs` — сырой комплект документов закупки с ЭТП/извещения (в продуктовых текстах: «документы заказчика»).

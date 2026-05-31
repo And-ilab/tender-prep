@@ -66,6 +66,49 @@ function isGenericIceTradeTitle(t) {
 }
 
 /**
+ * Заголовок страницы с IceTrade без названия процедуры («Просмотр конкурса», …).
+ * @param {string} t
+ */
+function isUiChromeTitle(t) {
+  if (!t || t.length < 3) return true;
+  if (isGenericIceTradeTitle(t)) return true;
+  const s = t.trim();
+  const low = s.toLowerCase();
+  if (/^просмотр\s+(конкурса|закупки|аукциона|торгов|тендера|процедуры)\s*\.?\s*$/i.test(s)) return true;
+  if (/^просмотр\s+(конкурса|закупки|аукциона)\s+[←‹»]/i.test(s)) return true;
+  if (/^карточк\w*\s+(закупки|конкурса|торгов|процедуры)\b/i.test(s)) return true;
+  if (/^(конкурс|аукцион|торги|закупк\w+)\s*$/i.test(low)) return true;
+  return false;
+}
+
+/**
+ * Наименование закупки с карточки (таблица на icetrade) — основной источник `title`; UI <title> только запасной.
+ * @param {Record<string, string>} labeledFields
+ * @param {ReturnType<typeof buildStructuredIceTradeCard>} structured
+ */
+function pickProcurementTitleFromFields(labeledFields, structured) {
+  /** @param {string[]} p */
+  const g = (p) => pickLabeledField(labeledFields, p);
+  const candidates = [
+    g(["наименование", "закупк"]),
+    g(["полное", "наименование", "закупк"]),
+    g(["предмет", "закупк"]),
+    g(["наименование", "лот"]),
+    g(["предмет", "лот"]),
+    g(["предмет", "закупки"]),
+    structured?.general?.subjectShortDescription,
+    g(["наименование", "процедур"]),
+    g(["название", "закупк"]),
+  ].filter((x) => typeof x === "string" && x.trim().length >= 4);
+  for (const c of candidates) {
+    const t = String(c).trim();
+    if (isUiChromeTitle(t) || isFooterNoise(t)) continue;
+    return t.slice(0, 600);
+  }
+  return null;
+}
+
+/**
  * @param {string} html
  */
 function extractH1Plain(html) {
@@ -75,7 +118,7 @@ function extractH1Plain(html) {
   let m;
   while ((m = re.exec(html)) !== null) {
     const t = stripHtmlToPlain(m[1]);
-    if (t.length >= 12 && !isGenericIceTradeTitle(t)) out.push(t);
+    if (t.length >= 12 && !isGenericIceTradeTitle(t) && !isUiChromeTitle(t)) out.push(t);
   }
   return out[0] ?? "";
 }
@@ -96,7 +139,13 @@ function extractJsonLdName(html) {
         if (!item || typeof item !== "object") continue;
         const o = /** @type {Record<string, unknown>} */ (item);
         const name = o.name;
-        if (typeof name === "string" && name.length > 15 && !isGenericIceTradeTitle(name)) return name.trim();
+        if (
+          typeof name === "string" &&
+          name.length > 15 &&
+          !isGenericIceTradeTitle(name) &&
+          !isUiChromeTitle(name)
+        )
+          return name.trim();
       }
     } catch {
       /* ignore */
@@ -358,6 +407,81 @@ function pickLabeledField(fields, mustInclude) {
 }
 
 /**
+ * Типичный «заглушечный» текст вместо юр. наименования: «согласно документации», «см. прикреплённый файл» и т.п.
+ * @param {string} raw
+ */
+export function iceTradeCustomerValueIsDocReference(raw) {
+  const t = String(raw || "").trim();
+  if (!t || t.length < 6) return true;
+  const low = t.toLowerCase();
+  return [
+    /согласно\s+документаци/i,
+    /согласно\s+услови/i,
+    /согласно\s+информаци/i,
+    /\bсм\.\s*прикрепл/i,
+    /\bсм\.\s*прилож/i,
+    /в\s+приложенн/i,
+    /в\s+присоедин/i,
+    /указано\s+в\s+извещен/i,
+    /указан\w*\s+в\s+документаци/i,
+    /находится\s+в\s+конкурсн/i,
+    /смотр(?:ите)?\s+в\s+(?:прикладн|прилож|файл)/i,
+    /в\s+соответствии\s+с\s+положением/i,
+    /\b(?:ред\.|ред\s)\s+по\s+данным/i,
+  ].some((re) => re.test(low));
+}
+
+/**
+ * Меньше = важнее. 999 — не строка организации‑заказчика.
+ * @param {string} key — подпись из таблицы IceTrade (первая ячейка tr).
+ */
+function iceTradeCustomerRowPriority(key) {
+  const kl = key.trim().toLowerCase();
+  if (!kl || kl.length > 260) return 999;
+
+  /** Контактные поля без наименования организации */
+  if (
+    /фамил|телефон|e-mail|email|факс|контактн\w*\s+лиц\w*(?!\s+заказчик)/i.test(kl) &&
+    !/наименование|организатор|инициатор|заказчик/i.test(kl)
+  ) {
+    return 999;
+  }
+
+  if (/полное\s+наименование/.test(kl) && /заказчик|инициатор|организатор/.test(kl)) return 0;
+  if (/наименование/.test(kl) && /заказчик/.test(kl) && !/сокращ/.test(kl)) return 1;
+  if (/наименование/.test(kl) && /инициатор/.test(kl) && !/сокращ/.test(kl)) return 1;
+  if (/организатор\s+закупк|организатор\s+конкурсн/i.test(kl)) return 2;
+  if (/закупка\s+(?:проводится|осуществля)/i.test(kl)) return 3;
+  if (/сокращ.+наименование/.test(kl) && /заказчик/.test(kl)) return 4;
+  if (/^(?:заказчик|инициатор|организатор)[\s:]*$/i.test(kl.trim())) return 6;
+  if (/\bзаказчик\b/.test(kl)) return 7;
+  if (/\bорганизатор\b/.test(kl)) return 8;
+  if (/\bинициатор\b/.test(kl)) return 9;
+  return 999;
+}
+
+/**
+ * Выбор реального наименования заказчика из таблицы карточки (не «Согласно документации…»).
+ * @param {Record<string, string> | null | undefined} labeledFields
+ * @returns {string | null}
+ */
+export function pickIceTradeCustomerOrganizationName(labeledFields) {
+  if (!labeledFields || typeof labeledFields !== "object") return null;
+  /** @type {{ p: number; len: number; val: string }[]} */
+  const hits = [];
+  for (const [k0, raw] of Object.entries(labeledFields)) {
+    const p = iceTradeCustomerRowPriority(k0);
+    if (p >= 999) continue;
+    const v = String(raw).trim();
+    if (!v || iceTradeCustomerValueIsDocReference(v)) continue;
+    hits.push({ p, len: v.length, val: v });
+  }
+  if (hits.length === 0) return null;
+  hits.sort((a, b) => a.p - b.p || b.len - a.len);
+  return hits[0].val.slice(0, 480);
+}
+
+/**
  * Каноническая структура под типовую карточку `…/tenders/all/view/<id>` (IceTrade).
  * Заполняется из табличных подписей RU; при смене формулировок на площадке смотрите сырой `labeledFields`.
  *
@@ -372,8 +496,16 @@ function buildStructuredIceTradeCard(labeledFields) {
       subjectShortDescription: g(["краткое описание предмета закупки"]),
     },
     customer: {
-      procurementConductedBy: g(["закупка проводится"]),
-      customerNameAddressUnp: g(["полное наименование заказчика"]),
+      procurementConductedBy: (() => {
+        const x = g(["закупка проводится"]);
+        return x && !iceTradeCustomerValueIsDocReference(x) ? x : null;
+      })(),
+      customerNameAddressUnp:
+        pickIceTradeCustomerOrganizationName(labeledFields) ??
+        (() => {
+          const x = g(["полное наименование заказчика"]);
+          return x && !iceTradeCustomerValueIsDocReference(x) ? x : null;
+        })(),
       customerContacts: g(["фамилии", "телефон"]),
     },
     procedure: {
@@ -483,30 +615,40 @@ export function buildIceTradeImportSnapshot(html, ctx) {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
+  const plainForLabels = truncateIceTradeSiteChrome(plainOne.replace(/\s+/g, " "));
+  const fromHints = extractLabeledHints(htmlClean, plainForLabels);
+  const fromTable = extractTableRowsAsFields(htmlClean);
+  const labeledFields = { ...fromHints, ...fromTable };
+  const structured = buildStructuredIceTradeCard(labeledFields);
+  const procurementTitle = pickProcurementTitleFromFields(labeledFields, structured);
+
   const ogTitle = metaContent(htmlClean, "og:title");
   const titleFromTag = titleTag(htmlClean);
   const titleFromH1 = extractH1Plain(htmlClean);
   const titleFromLd = extractJsonLdName(htmlClean);
   const headings = extractHeadingLines(htmlClean);
-  let title = ogTitle || titleFromTag || "";
-  if (isGenericIceTradeTitle(title)) {
-    title = titleFromLd || titleFromH1 || title;
-  }
-  if (isGenericIceTradeTitle(title) && headings.length > 0) {
-    const procH = headings.find((h) => /процедур\w*\s+закупк/i.test(h));
-    if (procH) title = procH;
-    else title = headings[0] || title;
+
+  let title = "";
+  if (procurementTitle) {
+    title = procurementTitle;
+  } else {
+    title = ogTitle || titleFromTag || "";
+    if (isGenericIceTradeTitle(title)) {
+      title = titleFromLd || titleFromH1 || title;
+    }
+    if (isGenericIceTradeTitle(title) && headings.length > 0) {
+      const procH = headings.find((h) => /процедур\w*\s+закупк/i.test(h) && !isUiChromeTitle(h));
+      const goodH = headings.find((h) => !isUiChromeTitle(h) && h.length >= 15);
+      if (procH) title = procH;
+      else if (goodH) title = goodH;
+      else title = headings[0] || title;
+    }
   }
 
   const procedure = extractProcedureFromPlain(plainOne);
   const phones = extractPhones(plainOne);
   const emails = extractEmails(plainOne);
   const priceHints = extractPriceHints(plainOne);
-  const plainForLabels = truncateIceTradeSiteChrome(plainOne.replace(/\s+/g, " "));
-  const fromHints = extractLabeledHints(htmlClean, plainForLabels);
-  const fromTable = extractTableRowsAsFields(htmlClean);
-  const labeledFields = { ...fromHints, ...fromTable };
-  const structured = buildStructuredIceTradeCard(labeledFields);
   const documentLinks = extractDocumentLinks(htmlClean, ctx.pageUrl);
   const events = extractChronologyEvents(htmlClean, plainMulti);
 
@@ -514,9 +656,9 @@ export function buildIceTradeImportSnapshot(html, ctx) {
   const warnings = [];
   if (!html || html.length < 500) warnings.push("HTML карточки слишком короткий — возможно обрезка или ответ не полной страницы.");
   if (events.length === 0) warnings.push("Блок хронологии событий не найден — проверьте вручную на площадке.");
-  if (isGenericIceTradeTitle(ogTitle || titleFromTag || "") && !titleFromH1 && !titleFromLd && headings.length === 0) {
+  if (isUiChromeTitle(title) && !procurementTitle) {
     warnings.push(
-      "Заголовок закупки в снимке может быть неточным (на странице только шаблонный <title>) — смотрите карточку на icetrade.by.",
+      "Заголовок закупки в снимке может быть неточным (на странице только шаблонный заголовок) — смотрите поля таблицы или карточку на icetrade.by.",
     );
   }
   if (Object.keys(fromTable).length === 0 && Object.keys(fromHints).length === 0 && plainOne.length > 3000) {

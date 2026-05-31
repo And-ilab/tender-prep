@@ -10,13 +10,18 @@
     "lena:telegram": "node src/telegram/lena-bot.mjs",
     "lena:tenders": "node src/cli.js tenders",
     "icetrade:playwright-auth": "node scripts/icetrade-playwright-auth.mjs",
-    "icetrade:diagnose-download": "node scripts/icetrade-download-diagnose.mjs",
-    "icetrade:chromium-steps": "node scripts/icetrade-chromium-steps.mjs"
+    "icetrade:diagnose-download": "node scripts/icetrade-download-diagnose.mjs --demo",
+    "icetrade:diagnose-download-demo": "node scripts/icetrade-download-diagnose.mjs --demo",
+    "icetrade:diagnose-download-with-prime": "node scripts/icetrade-download-diagnose.mjs --demo --use-download-prime",
+    "icetrade:diagnose-download-headless": "node scripts/icetrade-download-diagnose.mjs",
+    "icetrade:headless-smoke": "node scripts/icetrade-headless-smoke.mjs",
+    "icetrade:smoke-demo-log": "node scripts/icetrade-headless-smoke.mjs --verbose"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
+    "jsonrepair": "^3.13.1",
     "@napi-rs/canvas": "^0.1.74",
     "mammoth": "^1.9.0",
     "pdf-parse": "^1.1.1",

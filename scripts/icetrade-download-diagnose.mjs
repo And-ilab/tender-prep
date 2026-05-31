@@ -11,21 +11,32 @@
  *   node scripts/icetrade-download-diagnose.mjs 1336510
  *   node scripts/icetrade-download-diagnose.mjs "https://icetrade.by/tenders/all/view/1336510" --max-files 2
  *   node scripts/icetrade-download-diagnose.mjs 1336510 --quick --url "<вставьте URL файла из браузера>"
+ *
+ * Видимый Chromium и шаги:
+ *   --headed     окно браузера + замедление UI (смотрите клики и вкладки)
+ *   --demo       как --headed, плюс краткие паузы Enter перед сеансами Playwright (шаги 3 и 4)
  */
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { stdin as input, stdout as output } from "node:process";
+import { createInterface } from "node:readline/promises";
 
-import { normalizeIceTradeViewId } from "../src/icetrade/viewIds.js";
+import { resolveDriveId } from "../src/drive/ids.js";
 import {
   fetchIceTradeCardHtml,
   downloadIceTradeBinary,
   validateAttachmentBuffer,
 } from "../src/icetrade/fetchPage.js";
+import { pushLocalFilesToTenderInputs } from "../src/icetrade/pushLocalDownloadsToInputs.js";
 import {
   withPlaywrightIceTradeDownloadBatch,
   fetchPageRendered,
+  getPlaywrightDownloadsDir,
+  getPlaywrightDownloadsBaseDir,
+  iceTradePlaywrightSkipDownloadPrime,
 } from "../src/icetrade/fetchPageRendered.js";
+import { normalizeIceTradeViewId } from "../src/icetrade/viewIds.js";
 import { extractAttachmentCandidates, isIceTradeLoginWallHtml } from "../src/icetrade/scrapeAttachments.js";
 
 /**
@@ -148,11 +159,36 @@ function parseArgs(argv) {
   /** @type {string | null} */
   let onlyUrl = null;
   let help = false;
+  let headed = false;
+  let demo = false;
+  let skipDownloadPrime = false;
+  let useDownloadPrime = false;
+  /** @type {string | null} */
+  let driveRoot = null;
+  let driveFlat = false;
+  /** @type {string | null} */
+  let driveYear = null;
 
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") {
       help = true;
+      continue;
+    }
+    if (a === "--headed") {
+      headed = true;
+      continue;
+    }
+    if (a === "--demo") {
+      demo = true;
+      continue;
+    }
+    if (a === "--skip-download-prime") {
+      skipDownloadPrime = true;
+      continue;
+    }
+    if (a === "--use-download-prime") {
+      useDownloadPrime = true;
       continue;
     }
     if (a === "--quick") {
@@ -176,6 +212,19 @@ function parseArgs(argv) {
       onlyUrl = argv[++i] ?? null;
       continue;
     }
+    if (a === "--drive-root") {
+      driveRoot = argv[++i]?.trim() ?? null;
+      continue;
+    }
+    if (a === "--drive-flat") {
+      driveFlat = true;
+      continue;
+    }
+    if (a === "--drive-year") {
+      const yy = argv[++i];
+      driveYear = yy && /^\d{4}$/.test(yy) ? yy : null;
+      continue;
+    }
     if (a.startsWith("-")) {
       console.error(`Неизвестный флаг: ${a}`);
       help = true;
@@ -184,7 +233,22 @@ function parseArgs(argv) {
     positionals.push(a);
   }
 
-  return { positionals, maxFiles, quick, skipNode, skipPwBatch, onlyUrl, help };
+  return {
+    positionals,
+    maxFiles,
+    quick,
+    skipNode,
+    skipPwBatch,
+    onlyUrl,
+    help,
+    headed,
+    demo,
+    skipDownloadPrime,
+    useDownloadPrime,
+    driveRoot,
+    driveFlat,
+    driveYear,
+  };
 }
 
 function timeoutMs() {
@@ -230,9 +294,10 @@ function printBufferDiagnosis(buf, contentType, label) {
   }
 }
 
-function printEnvSummary() {
+function printEnvSummary(/** @type {string} */ cardUrlForView) {
   const storage = process.env.LENA_ICETRADE_PLAYWRIGHT_STORAGE?.trim();
   const cookie = process.env.LENA_ICETRADE_COOKIE?.trim();
+  const vid = normalizeIceTradeViewId(cardUrlForView) ?? "";
   console.log("\n=== Контекст окружения ===");
   console.log(`  LENA_ICETRADE_PLAYWRIGHT_STORAGE: ${storage ? "(задано, длина пути " + storage.length + ")" : "(нет)"}`);
   if (storage) {
@@ -267,6 +332,14 @@ function printEnvSummary() {
     `  LENA_ICETRADE_PLAYWRIGHT_HEADED: ${process.env.LENA_ICETRADE_PLAYWRIGHT_HEADED?.trim() || "(unset → headless)"}`,
   );
   console.log(`  LENA_ICETRADE_FETCH_BACKEND: ${process.env.LENA_ICETRADE_FETCH_BACKEND?.trim() || "auto"}`);
+  console.log(`  Корень загрузок Playwright: ${getPlaywrightDownloadsBaseDir()}`);
+  console.log(
+    `  Папка загрузок для этой карточки (view ${vid || "?"}): ${getPlaywrightDownloadsDir(vid || undefined)}`,
+  );
+  console.log(`  process.cwd() при запуске: ${process.cwd()}`);
+  console.log(
+    `  Батч Playwright, вкладка «прогрев карточки» перед файлами: ${iceTradePlaywrightSkipDownloadPrime() ? "выкл (по умолчанию; при HTML вместо файла — карточка → модалка → скачивание)" : "вкл (--use-download-prime или LENA_ICETRADE_PLAYWRIGHT_SKIP_DOWNLOAD_PRIME=0)"}`,
+  );
 }
 
 /**
@@ -277,7 +350,32 @@ function heading(step, title) {
   console.log(`\n--- ${step}: ${title} ---`);
 }
 
-const { positionals, maxFiles, quick, skipNode, skipPwBatch, onlyUrl, help } = parseArgs(process.argv);
+const {
+  positionals,
+  maxFiles,
+  quick,
+  skipNode,
+  skipPwBatch,
+  onlyUrl,
+  help,
+  headed,
+  demo,
+  skipDownloadPrime,
+  useDownloadPrime,
+  driveRoot,
+  driveFlat,
+  driveYear,
+} = parseArgs(process.argv);
+
+if (skipDownloadPrime && useDownloadPrime) {
+  console.error("Нельзя вместе --skip-download-prime и --use-download-prime");
+  process.exit(1);
+}
+if (useDownloadPrime) {
+  process.env.LENA_ICETRADE_PLAYWRIGHT_SKIP_DOWNLOAD_PRIME = "0";
+} else if (skipDownloadPrime) {
+  process.env.LENA_ICETRADE_PLAYWRIGHT_SKIP_DOWNLOAD_PRIME = "1";
+}
 
 if (help || positionals.length < 1) {
   console.log(`Использование:
@@ -285,13 +383,21 @@ if (help || positionals.length < 1) {
 
 Пример:
   node scripts/icetrade-download-diagnose.mjs https://icetrade.by/tenders/all/view/1336510
+  node scripts/icetrade-download-diagnose.mjs 1336510 --demo
 
 Опции:
+  --demo                   видимое окно Chromium + замедление UI; Enter только перед шагами 3 и 4 (между ними — второй Chromium)
+  --headed                 только видимое окно и slowMo (без пауз Enter)
   --max-files N            сколько URL из HTML проверить (по умолчанию 4)
   --url URL                проверить только этот URL файла (карточка всё равно нужна для Referer/прогрева)
   --quick                  не вызывать fetchPageRendered (полный Chromium + клики по документам)
   --skip-node              не скачивать через Node (downloadIceTradeBinary)
   --skip-playwright-batch  не вызывать withPlaywrightIceTradeDownloadBatch
+  --skip-download-prime    явно выкл. вкладку прогрева (как по умолчанию)
+  --use-download-prime     вкл. отдельную вкладку прогрева карточки перед батчем (= LENA_ICETRADE_PLAYWRIGHT_SKIP_DOWNLOAD_PRIME=0)
+  --drive-root <url|id>   в конце: залить каталог Playwright-загрузок в **inputs** (GOOGLE_DRIVE_CREDENTIALS как у команды drive)
+  --drive-flat             путь тендера на Drive без года
+  --drive-year ГГГГ        год в пути _lena/tenders/<год>/<id>/…
 
 Задайте в файле C:\\tender-prep\\.env (см. examples\\env.telegram.example) **или** в PowerShell перед node:
 
@@ -319,7 +425,48 @@ if (/^https?:\/\//i.test(raw)) {
   cardUrl = VIEW_PAGE(id);
 }
 
-printEnvSummary();
+/** Режим демонстрации: окно браузера и пояснения в stderr */
+let useHeaded = headed || demo;
+if (demo) useHeaded = true;
+if (useHeaded) {
+  process.env.LENA_ICETRADE_PLAYWRIGHT_HEADED = "1";
+  if (!process.env.LENA_ICETRADE_PLAYWRIGHT_SLOW_MO_MS?.trim()) {
+    process.env.LENA_ICETRADE_PLAYWRIGHT_SLOW_MO_MS = demo ? "480" : "350";
+  }
+}
+
+/** @type {import("node:readline/promises").Interface | null} */
+let demoRl = null;
+if (demo) {
+  demoRl = createInterface({ input, output });
+}
+
+/**
+ * @param {string} title
+ */
+async function demoPause(title) {
+  if (!demoRl) return;
+  console.error(`\n>>> ${title}`);
+  await demoRl.question("    Enter — продолжить\n");
+}
+
+/** @param {string} phase */
+async function playwrightDemoStep(phase) {
+  console.error(`\n▶ ${phase}`);
+}
+
+try {
+  if (demo) {
+    await demoPause(
+      "Шаги 1–2: только Node (без окна). Далее откроется Chromium на шагах 3–4; между шагами 3 и 4 нажмёте Enter ещё раз.",
+    );
+  }
+  printEnvSummary(cardUrl);
+if (useHeaded) {
+  console.error(
+    "\n(Режим видимого браузера: шаги 3 и 4 открывают Chromium по отдельности — смотрите окно и консоль.)\n",
+  );
+}
 heading("1", `Карточка (Node): ${cardUrl}`);
 
 let htmlNode = "";
@@ -378,23 +525,41 @@ for (let i = 0; i < fileTargets.length; i++) {
 }
 
 if (!skipPwBatch) {
-  heading("3", "Playwright: прогрев карточки + context.request.get (как в bootstrap)");
+  const batchNoWarmTab = iceTradePlaywrightSkipDownloadPrime();
+  heading(
+    "3",
+    batchNoWarmTab
+      ? "Playwright: батч без вкладки прогрева (карточка → модалка → файл только если GET не дал вложение)"
+      : "Playwright: сначала вкладка прогрева карточки, затем context.request / клики",
+  );
+  if (demo) {
+    await demoPause(
+      batchNoWarmTab
+        ? "Шаг 3: без отдельного прогрева — сразу запросы к файлам; при необходимости откроется карточка, модалка «Загрузка файла», второй клик."
+        : "Шаг 3: сначала вкладка прогрева карточки, затем для каждого файла запросы и при необходимости клики.",
+    );
+  }
   try {
-    await withPlaywrightIceTradeDownloadBatch(timeoutMs(), cardUrl, async ({ requestBinary }) => {
-      for (let i = 0; i < fileTargets.length; i++) {
-        const { url: fileUrl, linkText } = fileTargets[i];
-        console.log(`\n  [${i + 1}/${fileTargets.length}] ${fileUrl}`);
-        try {
-          const { buffer, contentType } = await requestBinary(fileUrl, cardUrl);
-          printBufferDiagnosis(buffer, contentType, "Playwright request + fallback goto");
-          const nameForVal = validationFileName(fileUrl, linkText);
-          const v = validateAttachmentBuffer(buffer, nameForVal, contentType);
-          console.log(`    validateAttachmentBuffer (${nameForVal}): ${v.ok ? "ok" : "FAIL — " + v.reason}`);
-        } catch (e) {
-          console.error(`  Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+    await withPlaywrightIceTradeDownloadBatch(
+      timeoutMs(),
+      cardUrl,
+      async ({ requestBinary }) => {
+        for (let i = 0; i < fileTargets.length; i++) {
+          const { url: fileUrl, linkText } = fileTargets[i];
+          console.log(`\n  [${i + 1}/${fileTargets.length}] ${fileUrl}`);
+          try {
+            const { buffer, contentType } = await requestBinary(fileUrl, cardUrl);
+            printBufferDiagnosis(buffer, contentType, "Playwright request + fallback goto");
+            const nameForVal = validationFileName(fileUrl, linkText);
+            const v = validateAttachmentBuffer(buffer, nameForVal, contentType);
+            console.log(`    validateAttachmentBuffer (${nameForVal}): ${v.ok ? "ok" : "FAIL — " + v.reason}`);
+          } catch (e) {
+            console.error(`  Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+          }
         }
-      }
-    });
+      },
+      { onStep: playwrightDemoStep, viewId: normalizeIceTradeViewId(cardUrl) ?? "" },
+    );
   } catch (e) {
     console.error(`  Ошибка сессии Playwright: ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -404,8 +569,13 @@ if (!skipPwBatch) {
 
 if (!quick) {
   heading("4", "Playwright: fetchPageRendered (клики по блоку документов, settle, сеть JSON)");
+  if (demo) {
+    await demoPause(
+      "Шаг 4: второе окно Chromium — полный рендер карточки (вводные документы, прокрутка, пауза, снимок HTML). Первое окно шага 3 уже закрыто.",
+    );
+  }
   try {
-    const r = await fetchPageRendered(cardUrl, timeoutMs());
+    const r = await fetchPageRendered(cardUrl, timeoutMs(), { onStep: playwrightDemoStep });
     if (r.warnings?.length) for (const w of r.warnings) console.log(`  warning: ${w}`);
     console.log(`  HTML длина: ${r.html.length}, networkFileUrls: ${r.networkFileUrls.length}`);
     if (r.networkFileUrls.length) {
@@ -427,21 +597,26 @@ if (!quick) {
     const extra = cands.filter((c) => !knownUrls.has(c.url)).slice(0, Math.max(0, maxFiles - fileTargets.length));
     if (extra.length && !onlyUrl) {
       console.log("\n  Доп. URL только из шага 4 (не были в шаге 2), повторная проверка Playwright request:");
-      await withPlaywrightIceTradeDownloadBatch(timeoutMs(), cardUrl, async ({ requestBinary }) => {
-        for (const c of extra) {
-          const fileUrl = c.url;
-          console.log(`\n    ${fileUrl}`);
-          try {
-            const { buffer, contentType } = await requestBinary(fileUrl, cardUrl);
-            printBufferDiagnosis(buffer, contentType, "Playwright");
-            const nameForVal = validationFileName(fileUrl, c.linkText);
-            const v = validateAttachmentBuffer(buffer, nameForVal, contentType);
-            console.log(`    validateAttachmentBuffer (${nameForVal}): ${v.ok ? "ok" : "FAIL — " + v.reason}`);
-          } catch (e) {
-            console.error(`    Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+      await withPlaywrightIceTradeDownloadBatch(
+        timeoutMs(),
+        cardUrl,
+        async ({ requestBinary }) => {
+          for (const c of extra) {
+            const fileUrl = c.url;
+            console.log(`\n    ${fileUrl}`);
+            try {
+              const { buffer, contentType } = await requestBinary(fileUrl, cardUrl);
+              printBufferDiagnosis(buffer, contentType, "Playwright");
+              const nameForVal = validationFileName(fileUrl, c.linkText);
+              const v = validateAttachmentBuffer(buffer, nameForVal, contentType);
+              console.log(`    validateAttachmentBuffer (${nameForVal}): ${v.ok ? "ok" : "FAIL — " + v.reason}`);
+            } catch (e) {
+              console.error(`    Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+            }
           }
-        }
-      });
+        },
+        { onStep: playwrightDemoStep, viewId: normalizeIceTradeViewId(cardUrl) ?? "" },
+      );
     }
   } catch (e) {
     console.error(`  Ошибка: ${e instanceof Error ? e.message : String(e)}`);
@@ -450,4 +625,27 @@ if (!quick) {
   heading("4", "fetchPageRendered пропущен (--quick)");
 }
 
+if (driveRoot?.trim()) {
+  const vid = normalizeIceTradeViewId(cardUrl);
+  heading("5", `Google Drive → inputs (view ${vid ?? "?"})`);
+  if (!vid) {
+    console.error("  --drive-root: не удалось извлечь view id из карточки — укажите URL или число.");
+  } else {
+    try {
+      const rootId = resolveDriveId(driveRoot.trim());
+      const localDir = getPlaywrightDownloadsDir(vid || undefined);
+      const r = await pushLocalFilesToTenderInputs(rootId, vid, localDir, {
+        flat: driveFlat,
+        year: driveYear ?? undefined,
+      });
+      console.log(JSON.stringify({ drivePush: r }, null, 2));
+    } catch (e) {
+      console.error(`  Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+}
+
 console.log("\n=== Готово ===\n");
+} finally {
+  if (demoRl) await demoRl.close().catch(() => {});
+}

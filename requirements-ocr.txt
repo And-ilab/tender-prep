@@ -1,0 +1,4 @@
+# Опционально: качественный разбор PDF (см. scripts/lena_pdf_ocr.py).
+# Установка: pip install -r requirements-ocr.txt
+# Нужен также Tesseract OCR в PATH с языком rus (Windows: установщик + tessdata).
+pymupdf>=1.24.0

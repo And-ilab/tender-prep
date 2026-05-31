@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import https from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -221,6 +222,56 @@ async function fetchBinaryFetch(url, headers, timeoutMs) {
 }
 
 /**
+ * @param {Buffer} buffer
+ */
+function bufferStartsLikeHtml(buffer) {
+  if (!buffer || buffer.length < 8) return false;
+  const head = buffer
+    .subarray(0, Math.min(500, buffer.length))
+    .toString("utf8")
+    .trimStart()
+    .toLowerCase();
+  return head.startsWith("<") || head.includes("<!doctype") || head.includes("<html");
+}
+
+/**
+ * @param {Buffer} buffer
+ * @returns {"pdf"|"zip"|"doc"|"html"|"unknown"}
+ */
+export function detectAttachmentBufferKind(buffer) {
+  if (!buffer || buffer.length < 4) return "unknown";
+  if (bufferStartsLikeHtml(buffer)) return "html";
+  const sig5 = buffer.subarray(0, 5).toString("latin1");
+  if (sig5.startsWith("%PDF")) return "pdf";
+  if (buffer[0] === 0x50 && buffer[1] === 0x4b && buffer[2] === 0x03 && buffer[3] === 0x04) return "zip";
+  if (buffer[0] === 0xd0 && buffer[1] === 0xcf && buffer[2] === 0x11 && buffer[3] === 0xe0) return "doc";
+  return "unknown";
+}
+
+/**
+ * @param {string} fileUrl
+ * @param {string | undefined} linkText
+ */
+export function defaultIceTradeAttachmentFileName(fileUrl, linkText) {
+  const t = linkText?.trim();
+  if (t && /\.(pdf|docx?|zip|rar|7z|xlsx?|csv|txt|pptx?)$/i.test(t)) {
+    return t.replace(/[\\/:*?"<>|]+/g, "_").slice(0, 180);
+  }
+  try {
+    const u = new URL(fileUrl);
+    const n = u.searchParams.get("n");
+    if (n !== null && /^\d+$/.test(n) && /getfile/i.test(u.pathname)) {
+      return `document-${n}.pdf`;
+    }
+    const base = u.pathname.split("/").pop() || "";
+    if (/\.(pdf|docx?|zip|rar|7z)$/i.test(base)) return decodeURIComponent(base.split("?")[0]);
+  } catch {
+    /* ignore */
+  }
+  return "download.pdf";
+}
+
+/**
  * @param {string} url
  */
 function guessBasenameFromUrl(url) {
@@ -241,7 +292,8 @@ function guessBasenameFromUrl(url) {
  * @param {string} fileNameHint
  */
 export function attachmentResponseLooksLikeHtmlStub(url, buffer, contentType, fileNameHint) {
-  const v = validateAttachmentBuffer(buffer, fileNameHint, contentType);
+  if (detectAttachmentBufferKind(buffer) === "html") return true;
+  const v = validateAttachmentBuffer(buffer, fileNameHint, contentType, url);
   if (!v.ok) return true;
   if (contentType?.includes("text/html")) return true;
   const low = url.toLowerCase();
@@ -372,15 +424,29 @@ async function downloadBinaryCurl(url, headers, timeoutMs) {
  * @param {Buffer} buffer
  * @param {string} fileName
  * @param {string | null | undefined} contentType — основной тип из HTTP (без параметров)
+ * @param {string} [fileUrl]
  * @returns {{ ok: true } | { ok: false, reason: string }}
  */
-export function validateAttachmentBuffer(buffer, fileName, contentType) {
+export function validateAttachmentBuffer(buffer, fileName, contentType, fileUrl) {
   const low = fileName.toLowerCase();
   const ct = (contentType || "").toLowerCase();
+  const kind = detectAttachmentBufferKind(buffer);
+  if (kind === "html") {
+    return {
+      ok: false,
+      reason:
+        "вместо PDF получен HTML — для публичных карточек это часто отличие автоматического клиента от браузера (заголовки, TLS, антибот); имеет смысл **LENA_ICETRADE_PLAYWRIGHT** / прогрев карточки, опционально **LENA_ICETRADE_COOKIE** или **STORAGE** как у реального браузера",
+    };
+  }
   if (!buffer || buffer.length < 16) {
     return { ok: false, reason: "пустой или слишком короткий ответ" };
   }
-  if (low.endsWith(".pdf")) {
+  const urlLow = (fileUrl || "").toLowerCase();
+  const expectPdf =
+    low.endsWith(".pdf") ||
+    urlLow.includes("/getfile") ||
+    /[?&]f=detail\b/i.test(urlLow);
+  if (expectPdf && kind !== "pdf") {
     const sig = buffer.subarray(0, 5).toString("latin1");
     if (!sig.startsWith("%PDF")) {
       const head = buffer
@@ -495,4 +561,58 @@ export async function downloadIceTradeBinary(url, headers, timeoutMs, opts = {})
   }
 
   return downloadIceTradeBinaryViaBackends(url, h, timeoutMs, fileNameHint, opts.cardPageUrl);
+}
+
+/**
+ * Пакетное скачивание через один PowerShell WebSession (Windows, без Playwright).
+ * @param {string} cardPageUrl
+ * @param {{ id: string, url: string, fileName: string, linkText?: string }[]} items
+ * @param {string} outDir
+ * @param {number} timeoutMs
+ * @param {Record<string, string>} headers
+ * @returns {Promise<{ id: string, ok: boolean, path?: string, bytes?: number, error?: string }[]>}
+ */
+export async function downloadIceTradeBatchViaPowerShellSession(
+  cardPageUrl,
+  items,
+  outDir,
+  timeoutMs,
+  headers,
+) {
+  if (process.platform !== "win32" || process.env.LENA_ICETRADE_NO_POWERSHELL_FALLBACK === "1") {
+    return [];
+  }
+  const scriptPath = join(process.cwd(), "scripts", "lena-server", "icetrade-download-session.ps1");
+  if (!existsSync(scriptPath)) {
+    throw new Error(`Нет скрипта ${scriptPath} — обновите репозиторий (git pull).`);
+  }
+  const work = await mkdtemp(join(tmpdir(), "lena-ps-batch-"));
+  const manifestPath = join(work, "manifest.json");
+  const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
+  const payload = {
+    cardPageUrl,
+    outDir,
+    timeoutSec,
+    userAgent: headers["User-Agent"] ?? "",
+    cookie: headers.Cookie ?? "",
+    items: items.map((it) => ({
+      id: it.id,
+      url: it.url,
+      fileName: it.fileName,
+    })),
+  };
+  await writeFile(manifestPath, JSON.stringify(payload), "utf8");
+  try {
+    const { stdout } = await execFileAsync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-ManifestPath", manifestPath],
+      { maxBuffer: 8 * 1024 * 1024, windowsHide: true, encoding: "utf8" },
+    );
+    const raw = typeof stdout === "string" ? stdout.trim() : stdout.toString("utf8").trim();
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } finally {
+    await rm(work, { recursive: true, force: true }).catch(() => {});
+  }
 }

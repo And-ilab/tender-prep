@@ -4,14 +4,18 @@
 
 ## Документация
 
+**Для менеджеров и операторов (бизнес):** короткая инструкция — [docs/USER_SHORT_RU.md](docs/USER_SHORT_RU.md) (название **«Лена»**, статус решения, флоу по стадиям, что нужно от менеджера по продажам).
+
 | Файл | Назначение |
 |------|------------|
+| [docs/USER_SHORT_RU.md](docs/USER_SHORT_RU.md) | Краткая инструкция для пользователей: роль системы как «менеджера по подготовке тендерных документов», тестовый статус, стадии флоу, ожидания от продаж |
 | [docs/PRODUCT_CONTEXT.md](docs/PRODUCT_CONTEXT.md) | Продуктовый контекст: для кого Лена, границы ответственности, сущности и термины |
 | [docs/PARSERIT_INTEGRATION.md](docs/PARSERIT_INTEGRATION.md) | Интеграция с parserit: пути скриптов/флоу в Windmill, входы/выходы, типовой порядок вызовов |
 | [docs/WINDOWS_GIT.md](docs/WINDOWS_GIT.md) | Работа с Git на Windows для этого репозитория и смежных проектов |
 | [docs/GOOGLE_DRIVE.md](docs/GOOGLE_DRIVE.md) | Google Drive: сервисный аккаунт, команды CLI `drive` |
 | [docs/GOOGLE_DRIVE_GCP_SETUP.md](docs/GOOGLE_DRIVE_GCP_SETUP.md) | Пошагово: GCP, включение Drive API, ключ, шаринг папки, проверка из Node |
 | [docs/TELEGRAM.md](docs/TELEGRAM.md) | Тестовая группа в Telegram и смоук-бот (Bot API) |
+| [scripts/lena-server/README.md](scripts/lena-server/README.md) | Деплой бота «Лена» на сервер 24/7 (systemd, миграция с ноутбука) |
 | [docs/CORPUS_AND_RAG.md](docs/CORPUS_AND_RAG.md) | Корпус прошлых тендеров на Drive: инвентаризация, контекст, векторный RAG (план) |
 | [docs/RAG_VECTOR_PIPELINE.md](docs/RAG_VECTOR_PIPELINE.md) | RAG: чанки, эмбеддинги, векторное хранилище, контракт запроса, порядок внедрения |
 | [docs/LENA_CONTEXT_STRATEGY.md](docs/LENA_CONTEXT_STRATEGY.md) | Два слоя контекста: долгий архив vs короткие директивы; приоритет в промпте |

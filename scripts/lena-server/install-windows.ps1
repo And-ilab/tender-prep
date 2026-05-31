@@ -43,8 +43,12 @@ npm install --omit=dev 2>$null
 if ($LASTEXITCODE -ne 0) { npm install }
 
 if (-not $SkipPlaywright) {
-  Write-Host "Playwright Chromium..."
+  $pwBrowsers = "C:\ProgramData\ms-playwright"
+  New-Item -ItemType Directory -Force -Path $pwBrowsers | Out-Null
+  Write-Host "Playwright Chromium -> $pwBrowsers (общий каталог для службы SYSTEM и пользователя)..."
+  $env:PLAYWRIGHT_BROWSERS_PATH = $pwBrowsers
   npx playwright install chromium
+  Write-Host "Добавьте в .env: LENA_PLAYWRIGHT_BROWSERS_PATH=$pwBrowsers"
 }
 
 New-Item -ItemType Directory -Force -Path "C:\data\playwright-downloads", "C:\data\rag-index" | Out-Null

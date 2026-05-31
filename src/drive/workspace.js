@@ -6,6 +6,7 @@ import {
   LENA_SUB,
   TENDER_SUB,
   defaultTenderCalendarYear,
+  lenaCompanyDriveSubfolderNames,
   normalizeTenderYear,
   tenderFolderName,
 } from "./layoutConstants.js";
@@ -86,6 +87,15 @@ export async function ensureLenaTree(userRootId) {
   if (rF.created) created.push(`${LENA_ROOT_FOLDER}/${LENA_SUB.foundingDocs}`);
   const rN = await ensureChildFolder(lenaRootId, LENA_SUB.tenders);
   if (rN.created) created.push(`${LENA_ROOT_FOLDER}/${LENA_SUB.tenders}`);
+
+  for (const co of lenaCompanyDriveSubfolderNames()) {
+    const tc = await ensureChildFolder(rT.id, co);
+    if (tc.created) created.push(`${LENA_ROOT_FOLDER}/${LENA_SUB.templates}/${co}`);
+    const oc = await ensureChildFolder(rO.id, co);
+    if (oc.created) created.push(`${LENA_ROOT_FOLDER}/${LENA_SUB.orgDocs}/${co}`);
+    const fc = await ensureChildFolder(rF.id, co);
+    if (fc.created) created.push(`${LENA_ROOT_FOLDER}/${LENA_SUB.foundingDocs}/${co}`);
+  }
 
   return {
     layout: {
@@ -169,6 +179,7 @@ export async function ensureTenderTree(userRootId, tenderId, opts) {
 }
 
 /**
+ * Список файлов и папок в `_lena/templates` (корень и при необходимости подпапки компаний `gs-retail`, `finselvat` — как элементы списка).
  * @param {string} userRootId
  */
 export async function listTemplateFiles(userRootId) {
@@ -193,7 +204,7 @@ export async function listLibraryFiles(userRootId) {
 }
 
 /**
- * Универсальные документы организации (все тендеры): `_lena/org-docs`.
+ * Документы организации: `_lena/org-docs` (корень + подпапки **`gs-retail`**, **`finselvat`**).
  * @param {string} userRootId
  */
 export async function listOrgDocsFiles(userRootId) {
@@ -206,7 +217,7 @@ export async function listOrgDocsFiles(userRootId) {
 }
 
 /**
- * Учредительные и редко меняющиеся корпоративные документы: `_lena/founding-docs`.
+ * Учредительные документы: `_lena/founding-docs` (подпапки **`gs-retail`**, **`finselvat`**).
  * @param {string} userRootId
  */
 export async function listFoundingDocsFiles(userRootId) {

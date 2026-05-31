@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,7 +6,7 @@ import { assertCredentialsFile } from "../drive/config.js";
 import { getMetadata, listChildren, trashDriveFile, uploadFile } from "../drive/ops.js";
 import { ensureTenderTree } from "../drive/workspace.js";
 import { extractIceTradeViewIds, normalizeIceTradeViewId } from "./viewIds.js";
-import { fetchIceTradeCardHtml, downloadIceTradeBinary, validateAttachmentBuffer } from "./fetchPage.js";
+import { fetchIceTradeCardHtml, downloadIceTradeBinary, downloadIceTradeBatchViaPowerShellSession, defaultIceTradeAttachmentFileName, validateAttachmentBuffer } from "./fetchPage.js";
 import {
   fetchIceTradeCardHtmlPlaywright,
   iceTradePlaywrightEnabled,
@@ -138,6 +138,9 @@ function resolveDownloadFileName(fileUrl, linkText, contentDisposition) {
       }
     }
   }
+  if (!/\.(pdf|docx?|zip|rar|7z|xlsx?|csv|txt|pptx?)$/i.test(fileName)) {
+    fileName = defaultIceTradeAttachmentFileName(fileUrl, linkText);
+  }
   return safeBasename(fileName);
 }
 
@@ -163,7 +166,7 @@ async function downloadExternalToTemp(url, tmpRoot, timeoutMs, refererPageUrl, l
   if (buffer.byteLength > maxBytes) throw new Error(`Файл слишком большой (${buffer.byteLength} байт)`);
 
   const fileName = resolveDownloadFileName(url, linkText, contentDisposition);
-  const v = validateAttachmentBuffer(buffer, fileName, contentType);
+  const v = validateAttachmentBuffer(buffer, fileName, contentType, url);
   if (!v.ok) throw new Error(v.reason);
   const path = join(tmpRoot, `${Date.now()}-${fileName}`);
   await writeFile(path, buffer);
@@ -544,7 +547,7 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
             const maxBytes = 45 * 1024 * 1024;
             if (buffer.byteLength > maxBytes) throw new Error(`Файл слишком большой (${buffer.byteLength} байт)`);
             const baseName = resolveDownloadFileName(fileUrl, item.linkText, contentDisposition);
-            const v = validateAttachmentBuffer(buffer, baseName, contentType);
+            const v = validateAttachmentBuffer(buffer, baseName, contentType, fileUrl);
             if (!v.ok) throw new Error(v.reason);
             const dlPath = join(tmpRoot, `pw-${Date.now()}-${baseName}`);
             await writeFile(dlPath, buffer);
@@ -570,6 +573,86 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
       errors.push(
         `Скачивание вложений через Playwright: ${e instanceof Error ? e.message : String(e)} — повтор обычным HTTP.`,
       );
+    }
+  }
+
+  if (!usedPlaywrightFileBatch && candidates.length > 0 && process.platform === "win32") {
+    /** @type {{ id: string, url: string, fileName: string, linkText?: string }[]} */
+    const batchItems = [];
+    /** @type {Map<string, { url: string, linkText?: string }>} */
+    const batchById = new Map();
+    let bi = 0;
+    for (const item of candidates) {
+      if (batchItems.length >= maxFiles) break;
+      const predicted = predictInputFileNameBeforeDownload(item.url, item.linkText);
+      if (shouldSkipDownloadExistingOnDrive(predicted, inputChildren, existing)) {
+        skippedExistingSet.add(predicted);
+        continue;
+      }
+      const id = String(bi++);
+      batchItems.push({
+        id,
+        url: item.url,
+        fileName: predicted,
+        linkText: item.linkText,
+      });
+      batchById.set(id, item);
+    }
+    if (batchItems.length > 0) {
+      try {
+        const d = await mkdtemp(join(tmpRoot, "ps-batch-"));
+        const h = icetradeFetchHeaders();
+        const results = await downloadIceTradeBatchViaPowerShellSession(
+          pageUrl,
+          batchItems,
+          d,
+          timeoutMs,
+          h,
+        );
+        let okCnt = 0;
+        for (const r of results) {
+          const src = batchById.get(String(r.id));
+          if (!src) continue;
+          if (!r.ok || !r.path) {
+            errors.push(`${src.url}: PowerShell batch: ${r.error ?? "ошибка"}`);
+            continue;
+          }
+          try {
+            const buf = await readFile(r.path);
+            const baseName = resolveDownloadFileName(src.url, src.linkText, null);
+            const v = validateAttachmentBuffer(buf, baseName, null, src.url);
+            if (!v.ok) {
+              errors.push(`${src.url}: ${v.reason}`);
+              continue;
+            }
+            const dlPath = join(tmpRoot, `ps-${Date.now()}-${baseName}`);
+            await writeFile(dlPath, buf);
+            const uploadedOk = await consumeTempFileToInputs({
+              dl: { path: dlPath, fileName: baseName },
+              inputChildren,
+              existing,
+              inputsId,
+              uploaded,
+              errors,
+              skippedExistingSet,
+            });
+            if (uploadedOk) {
+              n += 1;
+              okCnt += 1;
+            }
+          } catch (e) {
+            errors.push(`${src.url}: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        if (okCnt > 0) {
+          errors.push(`**PowerShell batch (WebSession):** загружено **${okCnt}** из **${batchItems.length}** вложений.`);
+        }
+        await rm(d, { recursive: true, force: true }).catch(() => {});
+      } catch (e) {
+        errors.push(
+          `PowerShell batch (WebSession): ${e instanceof Error ? e.message : String(e)} — пробуем по одному файлу.`,
+        );
+      }
     }
   }
 

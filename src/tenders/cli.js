@@ -1,7 +1,11 @@
+import { resolve } from "node:path";
+
 import { resolveDriveId } from "../drive/ids.js";
+import { getPlaywrightDownloadsDir } from "../icetrade/fetchPageRendered.js";
 import { analyzeTenderAfterBootstrap } from "../icetrade/analyzeAfterBootstrap.js";
 import { bootstrapIceTradeToDrive } from "../icetrade/bootstrapDrive.js";
 import { extractTenderInputDocumentsToExtracted } from "../icetrade/inputDocumentsExtract.js";
+import { pushLocalFilesToTenderInputs } from "../icetrade/pushLocalDownloadsToInputs.js";
 import { normalizeIceTradeViewId } from "../icetrade/viewIds.js";
 
 function usage() {
@@ -11,6 +15,10 @@ function usage() {
       "",
       "  1) Импорт: вложения в inputs/ + **icetrade-import-snapshot.json** (поля карточки, события):",
       "     tenders icetrade-bootstrap <rootFolderUrlOrId> <iceUrl|viewId> [flat|ГГГГ]",
+      "",
+      "  1b) Только залить локальные файлы (напр. из playwright-downloads) в **inputs/** — дерево тендера создаётся на Drive через API:",
+      "     tenders icetrade-push-downloads <rootFolderUrlOrId> <viewId> [flat|ГГГГ] [--dir путь]",
+      "     Без --dir: каталог из LENA_ICETRADE_PLAYWRIGHT_DOWNLOADS_DIR или <cwd>/playwright-downloads.",
       "",
       "  2) Парсинг **inputs/**: при необходимости **inputs/extracted/** + **tender-pipeline-state.json** в корне тендера:",
       "     tenders tender-extract <rootFolderUrlOrId> <viewId> [flat|ГГГГ]",
@@ -37,10 +45,32 @@ function usage() {
  */
 export async function runTendersCli(args) {
   const runExtractFlag = args.includes("--extract");
-  const pos = args.filter((a) => a !== "--extract");
-  const [cmd, root, urlOrId, y] = pos;
+  /** @type {string | null} */
+  let dirFlag = null;
+  const filtered = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--extract") continue;
+    if (a === "--dir") {
+      const next = args[++i];
+      if (!next) {
+        console.error("После --dir укажите путь к локальной папке с файлами");
+        process.exitCode = 1;
+        return;
+      }
+      dirFlag = resolve(next);
+      continue;
+    }
+    filtered.push(a);
+  }
+  const [cmd, root, urlOrId, y] = filtered;
   if (!cmd || !root || !urlOrId) {
     usage();
+    return;
+  }
+  if (dirFlag && cmd !== "icetrade-push-downloads") {
+    console.error("Флаг --dir используется только с командой icetrade-push-downloads");
+    process.exitCode = 1;
     return;
   }
 
@@ -89,6 +119,23 @@ export async function runTendersCli(args) {
       const result = await analyzeTenderAfterBootstrap(rootId, tenderId, { flat, year });
       console.log(JSON.stringify(result, null, 2));
       if (!result.ok) process.exitCode = 2;
+    } catch (e) {
+      console.error(e instanceof Error ? e.message : String(e));
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (cmd === "icetrade-push-downloads") {
+    try {
+      const rootId = resolveDriveId(root);
+      const flat = y === "flat";
+      const year = y && y !== "flat" && /^\d{4}$/.test(y) ? y : undefined;
+      const tenderId = normalizeIceTradeViewId(urlOrId) ?? urlOrId.trim();
+      const localDir = dirFlag ?? getPlaywrightDownloadsDir(tenderId);
+      const result = await pushLocalFilesToTenderInputs(rootId, tenderId, localDir, { flat, year });
+      console.log(JSON.stringify({ ok: result.ok, ...result }, null, 2));
+      if (!result.ok) process.exitCode = 1;
     } catch (e) {
       console.error(e instanceof Error ? e.message : String(e));
       process.exitCode = 1;

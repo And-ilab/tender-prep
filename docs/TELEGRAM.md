@@ -63,10 +63,12 @@ node src/telegram/smoke-poll.mjs
 | `LENA_ICETRADE_COOKIE` | опционально: заголовок Cookie из DevTools — если `getFile` отдаёт HTML автоматике, хотя в браузере тот же файл открывается |
 | `LENA_ICETRADE_PLAYWRIGHT_DOWNLOAD_PRIME_MS` | пауза мс после открытия карточки в том же Chromium, что качает вложения (по умолчанию 2000; при сбоях попробуйте 3500–4000) |
 | `LENA_ICETRADE_PLAYWRIGHT_FILE_DOWNLOAD` | `0` — не качать вложения через Playwright (только Node HTTP) |
+| `LENA_ICETRADE_PLAYWRIGHT_DOWNLOADS_DIR` | необязательно: корень для загрузок Chromium (по умолчанию `<cwd>/playwright-downloads`). **Не задавайте системный `%TEMP%`** — ежедневная очистка этого каталога удалит временные папки импорта (**lena-ice-***) и даст ENOENT при bootstrap. |
+| `LENA_TELEGRAM_ICETRADE_IMPORT_ONLY` | по умолчанию **вкл.**: после ссылки IceTrade только импорт в **inputs**; **полный** конвейер в Telegram: `0` / `false` / `off` |
 
 Для вложений с площадки обычно нужны **Playwright** и рабочая **сессия** (`STORAGE` или `COOKIE`). Подробнее см. `examples/env.telegram.example` (блок IceTrade). `/help`, `/product` (IceTrade, Drive, политика корпуса RAG — см. [PRODUCT_CONTEXT.md](PRODUCT_CONTEXT.md)), `/templates`, `/library`, `/orgdocs`, `/foundingdocs`, `/context`, `/bundle <tender_id> [ГГГГ|flat]`, `/ingest <tender_id> [ГГГГ|flat] <папка_Drive>`, `/ask …`, **`/archivesearch …`** (алиас `/searcharchive`), **`/archiveask …`** (алиас `/askarchive`), `/tenderask …`, `/newchat`.
 
-Дополнительно в **группе**, если сообщение **обращено к боту** (@username / Reply / mention): бот распознаёт ссылку IceTrade (`https://` или без) и выполняет **bootstrap**: создаёт папку тендера на Drive (`tender_id` = номер view на площадке), пишет в **`inputs/icetrade-import-snapshot.json`** снимок полей карточки и **событий** (хронология), пробует скачать вложения в **`inputs`** и добавляет в **`notes`** файл с чеклистом того, что **запросить у менеджера**. В ответе в чате бот явно перечисляет загрузку файлов и ссылку/имя снимка. Полный разбор PDF/OCR — через parserit/Windmill отдельно (см. [PARSERIT_INTEGRATION.md](PARSERIT_INTEGRATION.md)). То же из CLI: `node src/cli.js tenders icetrade-bootstrap <root> <url|id> [flat|ГГГГ]`. Пайплайн: [TENDER_PIPELINE.md](TENDER_PIPELINE.md).
+Дополнительно в **группе** или в **личке**: бот обрабатывает входящий текст (кроме сообщений с `@` другого участника в начале); **ссылка IceTrade** запускает **bootstrap**: папка тендера на Drive, **`inputs/icetrade-import-snapshot.json`**, вложения в **`inputs`**, заметка в **`notes`**. По умолчанию (**`LENA_TELEGRAM_ICETRADE_IMPORT_ONLY`**) после импорта **не** запускаются анализ комплекта, парсинг **inputs** и LLM-карточка — только сообщение об успехе со ссылкой на **inputs**. Полный конвейер в Telegram: задайте `LENA_TELEGRAM_ICETRADE_IMPORT_ONLY=0` и при необходимости `LENA_ICETRADE_ANALYZE`, `LENA_TELEGRAM_EXTRACT_AFTER_BOOTSTRAP`, `LENA_TELEGRAM_CARD_AFTER_BOOTSTRAP`.
 
 Тот же **IceTrade bootstrap** без Telegram:
 
@@ -74,7 +76,7 @@ node src/telegram/smoke-poll.mjs
 node src/cli.js tenders icetrade-bootstrap <LENA_DRIVE_ROOT_или_id> "https://icetrade.by/tenders/all/view/1336510"
 ```
 
-**Архив (RAG):** команды ищут по **локальному** индексу на машине, где запущен бот. Держите в отдельном окне **сервер эмбеддингов** (`scripts/local_openai_embeddings/server.py`), если `LENA_EMBEDDING_BASE_URL` указывает на `127.0.0.1`.
+**Архив (RAG):** команды ищут по **локальному** индексу на машине, где запущен бот (на сервере — каталог вроде `/data/rag-index-…`, см. [lena-server](../scripts/lena-server/README.md)). Держите **сервер эмбеддингов** (`scripts/local_openai_embeddings/server.py`) на **той же** машине, если `LENA_EMBEDDING_BASE_URL=http://127.0.0.1:8765/v1`.
 
 **Нейросеть:** `/ask` — диалог с краткой памятью в рамках чата (до нескольких последних реплик). `/tenderask` — в модель передаётся усечённый JSON того же вида, что и у `/bundle`, плюс ваш вопрос (удобно спрашивать про структуру папок и ссылки). Ключ API не коммитьте; при утечке перевыпустите в кабинете провайдера.
 
@@ -83,11 +85,12 @@ node src/cli.js tenders icetrade-bootstrap <LENA_DRIVE_ROOT_или_id> "https://
 В одном чате часто идут **несколько закупок**. Чтобы Лена не смешивала контекст:
 
 1. Пользователь пишет в **ветке** нужного тендера: через **«Ответить»** на сообщение, с которым договорились работать для этой закупки (например на файл/ответ бота после `/bundle <tender_id>`, на реплику с вопросом по этому же тендеру, на закреп с `tender_id`).
-2. Лена в промптах настроена **напоминать** об этом и **не додумывать** тендер, если привязки нет — см. [LENA_RULES.md](LENA_RULES.md), раздел «Telegram: один чат, несколько тендеров».
-3. Надёжный вариант без привязки к ветке: **`/tenderask <tender_id> …`** — `tender_id` в команде задаёт закупку явно.
-4. Если в чате **указание без привязки** к тендеру и неясно, о какой закупке речь — Лена **не угадывает**: просит **`tender_id`** или **ссылку** на тендер/закупку (см. [LENA_RULES.md](LENA_RULES.md) §6a).
+2. Бот **видит все** сообщения в группе и **отвечает**, кроме тех, что **начинаются** с `@` **другого** участника (не бота) — такие **молча игнорируются** (переписка «в сторону» коллеги). Привязка к тендеру: прежде всего **«Ответить»** на ветку по закупке; также распознаются номер/IceTrade в тексте и `/tenderask` (§6a в [LENA_RULES.md](LENA_RULES.md)).
+3. Лена **не додумывает** закупку без контекста и отвечает **кратко** — см. [LENA_RULES.md](LENA_RULES.md), раздел «Telegram: один чат, несколько тендеров».
+4. Надёжный вариант без привязки к ветке: **`/tenderask <tender_id> …`** — `tender_id` в команде задаёт закупку явно.
+5. Если в чате **указание без привязки** к тендеру и неясно, о какой закупке речь — бот и модель **не угадывают**: одна короткая фраза — повторить через **«Ответить»** на сообщение по закупке (см. [LENA_RULES.md](LENA_RULES.md) §6a).
 
-**Опционально (бот):** задайте `LENA_TELEGRAM_GROUP_ASK_REQUIRE_REPLY=1` (см. таблицу переменных выше) — в группах и супергруппах команда **`/ask`** без поля «ответ на сообщение» **не вызывает** LLM: бот отвечает коротким отказом и ссылкой на правило. В **личке** с ботом ограничение не действует. Для `/tenderask` / `/bundle` / `/ingest` проверка не включена (там уже есть `tender_id` в тексте команды, кроме случаев, когда команда ошибочна — тогда сработает обычная справка по использованию).
+**Опционально (бот):** задайте `LENA_TELEGRAM_GROUP_ASK_REQUIRE_REPLY=1` (см. таблицу переменных выше) — в группах и супергруппах команда **`/ask`** без поля «ответ на сообщение» **не вызывает** LLM: бот отвечает той же короткой подсказкой про **«Ответить»**. В **личке** с ботом ограничение не действует. Для `/tenderask` / `/bundle` / `/ingest` проверка не включена (там уже есть `tender_id` в тексте команды, кроме случаев, когда команда ошибочна — тогда сработает обычная справка по использованию).
 
 ### Лог переписки с менеджерами на Drive
 
@@ -116,6 +119,12 @@ node src\telegram\lena-bot.mjs
 ```
 
 В **PowerShell** то же самое: `$env:TELEGRAM_BOT_TOKEN="..."` и т.д. (одна строка на переменную; `#` там — комментарий только в конце строки после кода).
+
+### Деплой на сервер (не держать ноутбук включённым)
+
+Чтобы Лена работала **24/7** без вашего ноутбука, перенесите процесс на VPS или **Windows Server**: скопируйте `.env` и секреты Google/IceTrade, установите зависимости, включите **службу NSSM** (Windows) или **systemd** (Linux). **Важно:** с тем же `TELEGRAM_BOT_TOKEN` одновременно может работать только **один** экземпляр — после запуска на сервере остановите `lena-bot` на ноуте (`lena-bot.bat stop`), иначе в логе будет `Conflict`.
+
+Пошагово: **[scripts/lena-server/README.md](../scripts/lena-server/README.md)** (для Windows Server — раздел в начале файла). RAG/embeddings на том же хосте — [scripts/remote-rag-worker/README.md](../scripts/remote-rag-worker/README.md).
 
 ## 5. Связка с Google Drive в тесте
 

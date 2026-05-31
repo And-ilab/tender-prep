@@ -7,9 +7,11 @@
  *   set GOOGLE_DRIVE_CREDENTIALS=...json
  *   set OPENAI_API_KEY=...   (или LENA_OPENAI_API_KEY; опционально LENA_OPENAI_BASE_URL, LENA_OPENAI_MODEL)
  *   опционально для архива: LENA_RAG_INDEX_DIR, LENA_EMBEDDING_* (см. docs/TELEGRAM.md)
+ *   опционально: LENA_TELEGRAM_KP_SKIP_MANAGER_PRICE_GATE=1 — не ждать цену в Telegram перед выбором компании (КП)
  *   node src/telegram/lena-bot.mjs
  */
 
+import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { access } from "node:fs/promises";
 import { join, resolve as pathResolve } from "node:path";
@@ -63,6 +65,7 @@ import { runRagAsk } from "../rag/ask.js";
 import { runQuery } from "../rag/queryLocal.js";
 import {
   buildAgentDriveBundle,
+  ensureTenderTree,
   ingestDriveFolderToTenderInputs,
   listContextFiles,
   listFoundingDocsFiles,
@@ -71,27 +74,47 @@ import {
   listTemplateFiles,
 } from "../drive/workspace.js";
 import {
-  analyzeTenderAfterBootstrap,
-  formatIceTradeAnalysisForTelegram,
-} from "../icetrade/analyzeAfterBootstrap.js";
-import { bootstrapIceTradeToDrive } from "../icetrade/bootstrapDrive.js";
-import { extractTenderInputDocumentsToExtracted } from "../icetrade/inputDocumentsExtract.js";
+  MANAGER_PRICE_QUOTE_FILENAME,
+  readManagerPriceQuoteFromNotes,
+  readPreparationPromptFromNotes,
+  replaceManagerPriceQuoteFile,
+} from "../analysis/preparationPromptFromAnalysis.js";
+import { buildTelegramManagerPriceDocHints } from "../analysis/pricingPolicy.js";
+import {
+  extractCommercialTermsHintsFromCorpus,
+  paymentHintLooksLikeConcreteTerms,
+  warrantyHintLooksLikeConcreteTerms,
+  wrapPrefilledFromDocs,
+} from "../analysis/commercialTermsGate.js";
 import {
   buildTenderTelegramCard,
   formatTenderTelegramCardForTelegram,
 } from "../icetrade/tenderTelegramCard.js";
 import { extractIceTradeViewIds } from "../icetrade/viewIds.js";
+import {
+  buildConversationReply,
+  classifyConversationIntent,
+  normalizeConversationText,
+  telegramTenderContextMissingHint,
+} from "./lena-conversation.mjs";
+import {
+  iceTradeImportProgressMessage,
+  runIceTradeImportForMarkdown,
+  telegramIceTradeImportOnlyEnabled,
+} from "../import/iceTradeTelegramImport.js";
+import { OFFER_ORG, runCommercialProposalDraftToDrive } from "../analysis/commercialProposalLlm.js";
+import { runTenderInputsExtractMarkdown } from "../parse/tenderInputsParseFlow.js";
 
 /** Сжатый дефолт для смоук-тестов; полные правила — docs/LENA_RULES.md. Переопределение: LENA_LLM_SYSTEM_PROMPT. */
 const DEFAULT_LLM_SYSTEM = [
   "Ты «Лена» — специалист по подготовке тендерных документов, не универсальный помощник: сама формируешь пакет материалов заявки (требования, матрица, черновики текстов); в чате с командой при необходимости задаёшь короткие уточняющие вопросы, по умолчанию выдаёшь готовые фрагменты и структуру, а не общие рекомендации.",
   "Отвечай по-русски, кратко и по делу. Если не хватает данных — скажи, чего не хватает.",
-  "В общем Telegram-чате команда может вести несколько тендеров сразу: чтобы не путать закупки, пользователь должен писать через «Ответить» на сообщение по нужному тендеру (например на выдачу бота или закреп с tender_id). Если привязки нет и из текста неочевидно, о каком тендере речь — не принимай запрос: откажись и попроси повторить с «Ответить» или с командой /tenderask <tender_id> …; если пользователь даёт указание, но неясно, к какому тендеру оно относится — запроси явно tender_id или ссылку на закупку/тендер; время от времени напоминай об этом правиле.",
+  "В общем Telegram-чате может быть несколько тендеров: не угадывай закупку. Если привязки нет и из текста неясно, о каком тендере речь — ответь **одной короткой фразой**, как в подсказке бота: попроси написать через «Ответить» на сообщение по нужной закупке, чтобы сохранился контекст; **без** длинных списков вариантов (номера IceTrade, ссылки, команды).",
   "Не выдумывай содержимое файлов на Диске: опирайся только на то, что явно передано в сообщении (например JSON со ссылками).",
   "Если перечисляешь файлы проекта или оцениваешь состав папки: отдельно отметь форматы, которые не входят в поддерживаемый текстовый контур без предобработки (например .pdf, .doc, .docx и любые другие, кроме .txt/.md/.csv/.log и текста после извлечения). Явно предупреди, что их содержимое не учтено как текст до извлечения; как именно сигнализировать (отдельное сообщение, метка, задача) — по договорённости с пользователем.",
   "Универсальные документы организации (справка банка со сроком, бухгалтерский баланс, отчёт о прибылях и убытках) хранятся в `_lena/org-docs` на Google Drive: при запросе загрузки указывай пользователю прямую ссылку на эту папку и webViewLink из бандла; проси подтвердить загрузку ответом «Ответить» на твоё сообщение; при повторной потребности в том же типе документа сначала используй уже загруженный актуальный файл из org-docs, не запрашивай дубликат без причины.",
   "Учредительные и редко меняющиеся документы (свидетельство о регистрации, устав, приказ о назначении директора) — папка `_lena/founding-docs`: те же правила, что для org-docs (ссылка на папку, подтверждение ответом на сообщение, проверка, реестр lena-founding-docs-registry.md, дальше брать из foundingDocsFiles без лишнего запроса).",
-  "Ценообразование: если в закупке явно есть процедура снижения цены или переговоры по снижению — не выводи «точную» финальную цену; если стартовая цена заказчика есть в тексте/бандле, задай стартовую сама на 1–2 % ниже неё с пометкой про этап снижения; если стартовой нет — не выдумывай, запроси менеджера. Если про снижение явно не сказано — кратко подсвети это и запроси цену у менеджера в Telegram, в запросе явно: с НДС 20% или без НДС (если в документах другой НДС — как в документах).",
+  "Ценообразование: процедура снижения — не финализируй цену без контекста; старт заказчика в тексте — можно старт участника чуть ниже с пометкой этапа; иначе запроси менеджера. Валюта и НДС — как в документах закупки (BYN, USD, EUR, RUB и т.д.; по РБ часто НДС 20 % в сумме — если в извещении иначе, следуй извещению).",
   "Переписка с менеджерами по тендеру (согласования, цены, условия) — веди контекстный лог на Drive: один файл notes/telegram-managers-log.md на тендер; после значимых реплик дополняй лог или выдай markdown-блок для вставки оператором.",
   "Документы заказчика: всё запрошенное и реально предоставимое должно быть в комплекте — иначе риск отклонения; рано помечай в матрице, чего нет и что нельзя подделать. Не трать силы на финальные тексты, завязанные на недоступный сертификат и т.п. Если требование выглядит принципиально неприменимым к предмету (пример: сертификат собственного производства при тендере на разработку ПО) — изложи гипотезу и запроси подтверждение у менеджера; письмо в тендерную комиссию за разъяснением не готовь и не инициируй автоматически, только после явного согласования человеком.",
   "Экономия токенов: сначала компактно — структура, матрица, что запросить у менеджера/куда загрузить файлы; длинные черновики разделов, которые завязаны на ещё не полученный документ (справка банка и т.д.), разворачивай после появления файла или текста в контексте, если только команда явно не просит полный черновик с заглушками.",
@@ -123,6 +146,9 @@ if (!rootRaw) {
   process.exit(1);
 }
 
+/** Сообщения импорта: кнопка «Анализ документов» снимается после первого нажатия (ключ chatId:message_id). */
+const consumedIceTradeParseButton = new Set();
+
 let rootId;
 try {
   rootId = resolveDriveId(rootRaw);
@@ -132,6 +158,372 @@ try {
 }
 
 const base = `https://api.telegram.org/bot${token}`;
+
+/** Мастер цены: `lena_mwz:<token>:pr|py|dl|wr:0|1` — 0 подставить из документов, 1 свои (ответом). */
+const CB_MGR_WIZ = "lena_mwz:";
+
+/** @type {Record<ManagerPriceWizardStep, string>} */
+const MGR_WIZ_STEP_CODES = { price: "pr", payment: "py", delivery: "dl", warranty: "wr" };
+
+/** @type {Record<string, ManagerPriceWizardStep>} */
+const MGR_WIZ_CODE_TO_STEP = { pr: "price", py: "payment", dl: "delivery", wr: "warranty" };
+
+const MGR_WIZ_STARTER_HINT_MIN_LEN = 12;
+
+/** callback_data для inline-кнопки парсинга после импорта: `lena_parse:<tender_id>` (лимит Telegram 64 B). */
+const CB_PARSE_PREFIX = "lena_parse:";
+
+/** Выбор компании для КП: `lena_kpo:s:<token>:0|1` (взаимно одна активна), затем `lena_kpo:g:<token>`. */
+const CB_KP_ORG_SELECT = "lena_kpo:s:";
+const CB_KP_ORG_GO = "lena_kpo:g:";
+
+const KP_ORG_PENDING_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * @typedef {"price" | "payment" | "delivery" | "warranty"} ManagerPriceWizardStep
+ * @typedef {Object} ManagerPriceWizardState
+ * @property {ManagerPriceWizardStep} step
+ * @property {string} [price]
+ * @property {string} [payment]
+ * @property {string} [delivery]
+ * @property {string} [warranty]
+ * @property {{ price?: string, payment?: string, delivery?: string, warranty?: string }} [embeddedHints]
+ */
+
+/**
+ * @typedef {Object} KpOrgPending
+ * @property {string} tenderId
+ * @property {{ flat?: boolean, year?: string }} opts
+ * @property {number} chatId
+ * @property {number} ts
+ * @property {"gs_retail" | "finselvat" | null} selected
+ * @property {"awaiting_manager_price" | "ready"} [kpGatePhase]
+ * @property {ManagerPriceWizardState | null} [managerPriceWizard]
+ */
+
+/** @type {Map<string, KpOrgPending>} */
+const kpOrgPending = new Map();
+
+/** Защита от повторного нажатия «Сформировать КП» по одному токену. */
+const kpOrgGoConsumed = new Set();
+
+function pruneKpOrgPendingMap() {
+  const now = Date.now();
+  for (const [k, v] of kpOrgPending) {
+    if (now - v.ts > KP_ORG_PENDING_TTL_MS) kpOrgPending.delete(k);
+  }
+  if (kpOrgPending.size > 2000) kpOrgPending.clear();
+  if (kpOrgGoConsumed.size > 8000) kpOrgGoConsumed.clear();
+}
+
+function newKpOrgToken() {
+  return randomBytes(4).toString("hex");
+}
+
+/**
+ * @param {string} token
+ * @param {"gs_retail" | "finselvat" | null} selected
+ */
+function buildKpOrgInlineKeyboard(token, selected) {
+  const row1 = [
+    {
+      text: selected === "gs_retail" ? "✓ ГС Ритейл" : "ГС Ритейл",
+      callback_data: `${CB_KP_ORG_SELECT}${token}:0`,
+    },
+    {
+      text: selected === "finselvat" ? "✓ Финсельват" : "Финсельват",
+      callback_data: `${CB_KP_ORG_SELECT}${token}:1`,
+    },
+  ];
+  /** @type {{ text: string, callback_data: string }[][]} */
+  const rows = [row1];
+  if (selected) {
+    rows.push([{ text: "Сформировать КП", callback_data: `${CB_KP_ORG_GO}${token}` }]);
+  }
+  return { inline_keyboard: rows };
+}
+
+/**
+ * @typedef {Object} ParseOrgPending
+ * @property {string} tenderId
+ * @property {{ flat?: boolean, year?: string }} opts
+ * @property {number} chatId
+ * @property {number} ts
+ * @property {"gs_retail" | "finselvat" | null} selected
+ * @property {"awaiting_manager_price" | "ready"} [kpGatePhase]
+ * @property {ManagerPriceWizardState | null} [managerPriceWizard]
+ */
+
+/** @type {Map<string, ParseOrgPending>} */
+const parseOrgPending = new Map();
+
+/** Выбор компании после парсинга: `lena_porg:s:<token>:0|1`; затем **Сформировать КП**: `lena_porg:g:<token>`. */
+const CB_PARSE_ORG_SELECT = "lena_porg:s:";
+const CB_PARSE_ORG_GO = "lena_porg:g:";
+
+const PARSE_ORG_PENDING_TTL_MS = 60 * 60 * 1000;
+
+/** Защита от повторного нажатия «Сформировать КП» в цепочке после парсинга. */
+const parseOrgGoConsumed = new Set();
+
+function pruneParseOrgPendingMap() {
+  const now = Date.now();
+  for (const [k, v] of parseOrgPending) {
+    if (now - v.ts > PARSE_ORG_PENDING_TTL_MS) parseOrgPending.delete(k);
+  }
+  if (parseOrgPending.size > 2000) parseOrgPending.clear();
+  if (parseOrgGoConsumed.size > 8000) parseOrgGoConsumed.clear();
+}
+
+/** Активное сообщение-якорь для ответа ценой: chatId:message_id → flow + token. */
+/** @type {Map<string, { flow: "parse" | "kp", token: string }>} */
+const managerPriceAnchorByMessage = new Map();
+
+function managerPriceGateDisabled() {
+  const v = process.env.LENA_TELEGRAM_KP_SKIP_MANAGER_PRICE_GATE?.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
+
+/** @param {KpOrgPending | ParseOrgPending} p */
+function kpGateIsReady(p) {
+  if (managerPriceGateDisabled()) return true;
+  return (p.kpGatePhase ?? "ready") === "ready";
+}
+
+/** @param {string} [s] */
+function meaningfulManagerStarterHint(s) {
+  return String(s ?? "").trim().length >= MGR_WIZ_STARTER_HINT_MIN_LEN;
+}
+
+/** @param {ManagerPriceWizardStep} step @param {string} [raw] */
+function managerStepQualifiesForDocStarter(step, raw) {
+  const r = String(raw ?? "");
+  if (step === "payment") return paymentHintLooksLikeConcreteTerms(r);
+  if (step === "warranty") return warrantyHintLooksLikeConcreteTerms(r);
+  return meaningfulManagerStarterHint(r);
+}
+
+/**
+ * @param {string} token
+ * @param {ManagerPriceWizardStep} step
+ * @param {ManagerPriceWizardState | null | undefined} wiz
+ */
+function buildManagerPriceWizardStarterKeyboard(token, step, wiz) {
+  const raw = wiz?.embeddedHints?.[step] ?? "";
+  if (!managerStepQualifiesForDocStarter(step, raw)) return undefined;
+  const code = MGR_WIZ_STEP_CODES[step];
+  return {
+    inline_keyboard: [
+      [
+        { text: "Подставить стартовые", callback_data: `${CB_MGR_WIZ}${token}:${code}:0` },
+        { text: "Предложить свои", callback_data: `${CB_MGR_WIZ}${token}:${code}:1` },
+      ],
+    ],
+  };
+}
+
+/**
+ * @param {ManagerPriceWizardStep} step
+ * @param {ManagerPriceWizardState | null | undefined} wiz
+ */
+function managerPriceStarterHintParagraph(step, wiz) {
+  const raw = String(wiz?.embeddedHints?.[step] ?? "").trim();
+  if (!managerStepQualifiesForDocStarter(step, raw)) return "";
+  const clipped = raw.length > 480 ? `${raw.slice(0, 477)}…` : raw;
+  return ["", "Из документов (ориентир):", clipped, "", "Кнопки ниже или ответ «Ответить» своим текстом.", ""].join("\n");
+}
+
+/** @param {ManagerPriceWizardStep} step */
+function managerPriceWizardNextStep(step) {
+  if (step === "price") return "payment";
+  if (step === "payment") return "delivery";
+  if (step === "delivery") return "warranty";
+  return null;
+}
+
+/**
+ * @param {string} tenderId
+ * @param {ManagerPriceWizardStep} step
+ * @param {ManagerPriceWizardState | null | undefined} [wiz]
+ */
+function buildManagerPriceWizardStepBody(tenderId, step, wiz) {
+  const hintBlock = managerPriceStarterHintParagraph(step, wiz);
+  const noCustomerStarterHint =
+    "В документации заказчика отсутствуют стартовые условия. Предложите свои.";
+  switch (step) {
+    case "price":
+      return [
+        `Условия для КП, тендер ${tenderId}. После шагов — выбор компании (ГС Ритейл или Финсельват).`,
+        "",
+        "Ответьте «Ответить» на это сообщение или используйте кнопки, если есть фрагмент из документов.",
+        "",
+        "Шаг 1 — цена. Укажите сумму в валюте закупки (как у заказчика: BYN, USD, EUR и т.д.) и кратко про НДС, если это важно по документам.",
+        hintBlock,
+        `Одним сообщением без мастера: /tenderprice ${tenderId} … → файл notes/${MANAGER_PRICE_QUOTE_FILENAME}`,
+      ].join("\n");
+    case "payment": {
+      const hasConcretePayDoc = paymentHintLooksLikeConcreteTerms(wiz?.embeddedHints?.payment ?? "");
+      return [
+        "Шаг 2 — Условия оплаты.",
+        !hasConcretePayDoc ? noCustomerStarterHint : "",
+        hintBlock,
+        "",
+        "Пример (услуги): аванс 30 %, остаток в течение 10 рабочих дней после акта.",
+        "",
+        "Пример (товар): предоплата 50 %, остаток до отгрузки или N календарных дней после поставки.",
+        "",
+        "Если оплата по этапам — перечислите доли; укажите календарные или рабочие дни.",
+      ]
+        .filter(Boolean)
+        .join("\n");
+    }
+    case "delivery":
+      return ["Шаг 3 — срок поставки или оказания услуг.", hintBlock].join("\n");
+    case "warranty": {
+      const hasConcreteWarDoc = warrantyHintLooksLikeConcreteTerms(wiz?.embeddedHints?.warranty ?? "");
+      return [
+        "Шаг 4 — Гарантийные обязательства.",
+        !hasConcreteWarDoc ? noCustomerStarterHint : "",
+        hintBlock,
+        "После ответа данные сохранятся на Drive и появятся кнопки выбора организации.",
+      ]
+        .filter(Boolean)
+        .join("\n");
+    }
+    default:
+      return "";
+  }
+}
+
+/**
+ * Первое сообщение мастера: подсказки по тексту закупки + шаг «цена».
+ * @param {string} tenderId
+ * @param {string} corpus
+ * @param {ManagerPriceWizardState | null | undefined} [wiz]
+ */
+function buildManagerPriceWizardFirstMessageText(tenderId, corpus, wiz) {
+  const hints = buildTelegramManagerPriceDocHints(corpus);
+  const hintBlock =
+    hints.length > 0 ? ["Кратко по тексту Analysis (не замена полного комплекта):", "", ...hints, "", "—", ""].join("\n") : "";
+  return hintBlock + buildManagerPriceWizardStepBody(tenderId, "price", wiz);
+}
+
+/**
+ * @param {ManagerPriceWizardState} wiz
+ * @param {string} tenderId
+ * @param {"telegram-reply" | "telegram-command"} source
+ * @param {string} stamp
+ */
+function assembleManagerPriceQuoteMarkdown(wiz, tenderId, source, stamp) {
+  return [
+    "---",
+    "lena: manager-price-quote",
+    `source: ${source}`,
+    `tender_id: ${tenderId}`,
+    `saved_at: ${stamp}`,
+    "pricing_note: Валюта и НДС — по документам закупки и ответам ниже (часто для РБ: BYN, НДС 20 % в сумме).",
+    "---",
+    "",
+    "## Цена предложения",
+    "",
+    String(wiz.price ?? "").trim(),
+    "",
+    "## Условия оплаты",
+    "",
+    String(wiz.payment ?? "").trim(),
+    "",
+    "## Срок поставки / оказания услуг",
+    "",
+    String(wiz.delivery ?? "").trim(),
+    "",
+    "## Гарантия",
+    "",
+    String(wiz.warranty ?? "").trim(),
+    "",
+  ].join("\n");
+}
+
+/**
+ * @param {string} corpus — markdown Analysis или Preparation (для выдержек «стартовых» строк).
+ * @returns {ManagerPriceWizardState}
+ */
+function newManagerPriceWizardState(corpus) {
+  const h = extractCommercialTermsHintsFromCorpus(corpus);
+  return {
+    step: "price",
+    embeddedHints: {
+      price: h.price || "",
+      payment: h.payment || "",
+      delivery: h.delivery || "",
+      warranty: h.warranty || "",
+    },
+  };
+}
+
+/**
+ * @param {number} chatId
+ * @param {number | undefined} anchorMid
+ * @param {{ flow: "parse" | "kp", token: string }} ref
+ */
+function registerManagerPriceAnchor(chatId, anchorMid, ref) {
+  if (typeof anchorMid !== "number") return;
+  managerPriceAnchorByMessage.set(`${chatId}:${anchorMid}`, ref);
+}
+
+/** @param {string} token */
+function unregisterManagerPriceAnchorsForToken(token) {
+  for (const [k, v] of [...managerPriceAnchorByMessage.entries()]) {
+    if (v.token === token) managerPriceAnchorByMessage.delete(k);
+  }
+}
+
+/** @param {number} chatId @param {string} tenderId */
+function findParseOrgAwaitingPriceForTender(chatId, tenderId) {
+  for (const [tok, p] of parseOrgPending) {
+    if (p.chatId === chatId && p.tenderId === tenderId && p.kpGatePhase === "awaiting_manager_price") {
+      return tok;
+    }
+  }
+  return null;
+}
+
+/** @param {number} chatId @param {string} tenderId */
+function findKpOrgAwaitingPriceForTender(chatId, tenderId) {
+  for (const [tok, p] of kpOrgPending) {
+    if (p.chatId === chatId && p.tenderId === tenderId && p.kpGatePhase === "awaiting_manager_price") {
+      return tok;
+    }
+  }
+  return null;
+}
+
+function newParseOrgToken() {
+  return randomBytes(4).toString("hex");
+}
+
+/**
+ * @param {string} token
+ * @param {"gs_retail" | "finselvat" | null} selected
+ */
+function buildParseOrgInlineKeyboard(token, selected) {
+  /** @type {{ text: string, callback_data: string }[][]} */
+  const rows = [
+    [
+      {
+        text: selected === "gs_retail" ? "✓ ГС Ритейл" : "ГС Ритейл",
+        callback_data: `${CB_PARSE_ORG_SELECT}${token}:0`,
+      },
+      {
+        text: selected === "finselvat" ? "✓ Финсельват" : "Финсельват",
+        callback_data: `${CB_PARSE_ORG_SELECT}${token}:1`,
+      },
+    ],
+  ];
+  if (selected) {
+    rows.push([{ text: "Сформировать КП", callback_data: `${CB_PARSE_ORG_GO}${token}` }]);
+  }
+  return { inline_keyboard: rows };
+}
 
 /** Username бота без @ (для упоминаний в группах). */
 let botUsernameNorm = "";
@@ -171,6 +563,127 @@ async function tgJson(method, body) {
 }
 
 /**
+ * @param {unknown} err
+ * @returns {Record<string, unknown> | null}
+ */
+function telegramApiErrorPayload(err) {
+  if (!(err instanceof Error)) return null;
+  try {
+    const j = JSON.parse(err.message);
+    return typeof j === "object" && j !== null ? /** @type {Record<string, unknown>} */ (j) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ответ на сообщение, которое уже удалено / недоступно (часто в темах или после чистки чата).
+ */
+function isReplyTargetMissingTelegramError(err) {
+  const d = telegramApiErrorPayload(err);
+  if (!d || d.ok !== false) return false;
+  const code = d.error_code;
+  const desc = String(d.description ?? "");
+  return (
+    code === 400 &&
+    /message to be replied not found|replied message not found|reply message not found/i.test(desc)
+  );
+}
+
+/**
+ * @param {string} callbackQueryId
+ * @param {string} [text] — короткая подсказка пользователю (до ~200 символов)
+ * @param {boolean} [showAlert]
+ */
+async function answerCallbackQuery(callbackQueryId, text, showAlert = false) {
+  /** @type {Record<string, unknown>} */
+  const body = { callback_query_id: callbackQueryId };
+  if (text != null && text !== "") {
+    body.text = text.slice(0, 200);
+    body.show_alert = showAlert;
+  }
+  await tgJson("answerCallbackQuery", body);
+}
+
+/** Значения `action` для sendChatAction — **английские идентификаторы**, как в Bot API (клиент Telegram может локализовать подпись). @see https://core.telegram.org/bots/api#sendchataction */
+const CHAT_ACTION = {
+  TYPING: "typing",
+  UPLOAD_DOCUMENT: "upload_document",
+  UPLOAD_PHOTO: "upload_photo",
+  FIND_LOCATION: "find_location",
+};
+
+const CHAT_ACTION_ALLOWED = new Set([
+  "typing",
+  "upload_photo",
+  "record_video",
+  "upload_video",
+  "record_voice",
+  "upload_voice",
+  "upload_document",
+  "choose_sticker",
+  "find_location",
+]);
+
+/**
+ * @param {string | undefined} raw
+ * @param {string} fallback
+ */
+function resolveChatAction(raw, fallback) {
+  const v = String(raw ?? "")
+    .trim()
+    .toLowerCase();
+  return CHAT_ACTION_ALLOWED.has(v) ? v : fallback;
+}
+
+/** Импорт с IceTrade → Drive (файлы в inputs). По умолчанию: `upload_document`. */
+function chatActionForIceTradeImport() {
+  const fromNew = process.env.LENA_TELEGRAM_CHAT_ACTION_IMPORT?.trim();
+  if (fromNew) return resolveChatAction(fromNew, CHAT_ACTION.UPLOAD_DOCUMENT);
+  const legacy = process.env.LENA_TELEGRAM_BOOTSTRAP_CHAT_ACTION?.trim().toLowerCase();
+  if (legacy === "typing") return CHAT_ACTION.TYPING;
+  if (legacy && CHAT_ACTION_ALLOWED.has(legacy)) return legacy;
+  return CHAT_ACTION.UPLOAD_DOCUMENT;
+}
+
+/** Парсинг inputs + Analysis (в основном текст и LLM). По умолчанию: `typing`. */
+function chatActionForParsePipeline() {
+  return resolveChatAction(process.env.LENA_TELEGRAM_CHAT_ACTION_PARSE?.trim(), CHAT_ACTION.TYPING);
+}
+
+/** КП, карточка и прочие вызовы LLM. По умолчанию: `typing`. */
+function chatActionForLlmDraft() {
+  return resolveChatAction(process.env.LENA_TELEGRAM_CHAT_ACTION_LLM?.trim(), CHAT_ACTION.TYPING);
+}
+
+/**
+ * @param {number} chatId
+ * @param {string} action
+ */
+async function sendChatAction(chatId, action) {
+  /** @type {Record<string, unknown>} */
+  const body = { chat_id: chatId, action };
+  if (typeof outboundMessageThreadId === "number") body.message_thread_id = outboundMessageThreadId;
+  await tgJson("sendChatAction", body);
+}
+
+/**
+ * Пока идёт долгая операция — с интервалом шлём sendChatAction (индикатор в строке ввода).
+ * @param {number} chatId
+ * @param {string} [action]
+ * @returns {() => void} остановить пульс
+ */
+function startChatActionPulse(chatId, action = CHAT_ACTION.TYPING) {
+  const intervalMs = 4000;
+  const tick = () => {
+    void sendChatAction(chatId, action).catch(() => {});
+  };
+  tick();
+  const id = setInterval(tick, intervalMs);
+  return () => clearInterval(id);
+}
+
+/**
  * @param {number} chatId
  * @param {number} [replyTo]
  * @param {string} filename
@@ -178,17 +691,28 @@ async function tgJson(method, body) {
  */
 async function sendJsonFile(chatId, replyTo, filename, obj) {
   const text = JSON.stringify(obj, null, 2);
-  const fd = new FormData();
-  fd.append("chat_id", String(chatId));
-  if (replyTo) fd.append("reply_to_message_id", String(replyTo));
-  if (typeof outboundMessageThreadId === "number") {
-    fd.append("message_thread_id", String(outboundMessageThreadId));
-  }
-  fd.append("document", new Blob([text], { type: "application/json" }), filename);
-  const res = await fetch(`${base}/sendDocument`, { method: "POST", body: fd });
-  const data = /** @type {Record<string, unknown>} */ (await res.json());
-  if (!data.ok) {
-    throw new Error(JSON.stringify(data));
+  const trySend = async (/** @type {number | undefined} */ rt) => {
+    const fd = new FormData();
+    fd.append("chat_id", String(chatId));
+    if (rt != null && rt !== undefined) fd.append("reply_to_message_id", String(rt));
+    if (typeof outboundMessageThreadId === "number") {
+      fd.append("message_thread_id", String(outboundMessageThreadId));
+    }
+    fd.append("document", new Blob([text], { type: "application/json" }), filename);
+    const res = await fetch(`${base}/sendDocument`, { method: "POST", body: fd });
+    const data = /** @type {Record<string, unknown>} */ (await res.json());
+    if (!data.ok) {
+      throw new Error(JSON.stringify(data));
+    }
+  };
+  try {
+    await trySend(replyTo);
+  } catch (e) {
+    if (replyTo != null && replyTo !== undefined && isReplyTargetMissingTelegramError(e)) {
+      await trySend(undefined);
+      return;
+    }
+    throw e;
   }
 }
 
@@ -231,9 +755,9 @@ function isBriefGreeting(stripped) {
 }
 
 /**
- * В группе считаем обращением только явное @username (подстрока или entity mention/text_mention).
- * Цепочка «Ответить» на Лену обрабатывается отдельно (см. replyChainToBot + continueAskDialog).
- * В личке — на любое сообщение с текстом.
+ * Явное @username бота (entity или подстрока). В группе **не** используется как фильтр «видимости»:
+ * все сообщения обрабатываются, кроме начинающихся с @ другого участника (см. groupMessageStartsWithOtherUserMention).
+ * В личке для совместимости по-прежнему true на любой текст.
  */
 function messageAddressesBot(text, chatType, msg) {
   if (chatType === "private") return true;
@@ -258,6 +782,51 @@ function messageAddressesBot(text, chatType, msg) {
   return text.toLowerCase().includes(`@${user}`);
 }
 
+/**
+ * В группе: сообщение **начинается** с @ другого участника (не бота) — не обрабатывать
+ * (переписка «в сторону» коллеги). «Ответить» на Лену без @ в начале — не игнорируется.
+ * @param {string} text
+ * @param {string} chatType
+ * @param {{ entities?: unknown[]; caption_entities?: unknown[] } | undefined} msg
+ */
+function groupMessageStartsWithOtherUserMention(text, chatType, msg) {
+  if (chatType !== "group" && chatType !== "supergroup") return false;
+
+  const startPos = text.length - text.trimStart().length;
+  const botUser = botUsernameNorm.trim().toLowerCase();
+  const ents = /** @type {Array<{ type?: string; offset?: number; length?: number; user?: { id?: number } }>} */ (
+    msg?.entities ?? msg?.caption_entities
+  );
+
+  if (Array.isArray(ents) && ents.length > 0) {
+    const mentions = ents
+      .filter((e) => e?.type === "mention" || e?.type === "text_mention")
+      .sort((a, b) => (a.offset ?? 0) - (b.offset ?? 0));
+    for (const e of mentions) {
+      const off = e.offset ?? 0;
+      if (off < startPos) continue;
+      const gap = text.slice(startPos, off);
+      if (gap.trim().length > 0) return false;
+      if (e.type === "text_mention") {
+        const uid = e.user?.id;
+        if (uid && botUserId > 0 && uid === botUserId) return false;
+        return true;
+      }
+      if (e.type === "mention") {
+        const chunk = text.slice(off, off + (e.length ?? 0)).toLowerCase();
+        if (botUser && chunk === `@${botUser}`) return false;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  const trimmed = text.trimStart();
+  const m = trimmed.match(/^@([A-Za-z0-9_]{3,})/);
+  if (!m) return false;
+  return !(botUser && m[1].toLowerCase() === botUser);
+}
+
 /** Пользователь ответил на сообщение этого бота (ветка диалога с Леной). */
 function replyChainToBot(msg) {
   const rt = /** @type {{ from?: { id?: number } } | undefined} */ (msg?.reply_to_message);
@@ -274,118 +843,67 @@ function groupAskHasProcurementContext(text, msg) {
   return false;
 }
 
-/** Парсинг inputs → extracted после bootstrap. LENA_TELEGRAM_EXTRACT_AFTER_BOOTSTRAP=1 */
-function telegramExtractAfterBootstrapEnabled() {
-  const v = process.env.LENA_TELEGRAM_EXTRACT_AFTER_BOOTSTRAP?.trim().toLowerCase() ?? "";
-  return v === "1" || v === "true" || v === "yes" || v === "on";
-}
-
-/** Карточка (LLM) после bootstrap — только по уже извлечённому тексту; либо включите шаг парсинга выше. LENA_TELEGRAM_CARD_AFTER_BOOTSTRAP=1 */
-function telegramCardAfterBootstrapEnabled() {
-  const v = process.env.LENA_TELEGRAM_CARD_AFTER_BOOTSTRAP?.trim().toLowerCase() ?? "";
-  return v === "1" || v === "true" || v === "yes" || v === "on";
-}
-
-/** Анализ комплекта после IceTrade bootstrap. Отключить: LENA_ICETRADE_ANALYZE=0|false|no|off */
-function icetradeAnalyzeEnabled() {
-  const v = process.env.LENA_ICETRADE_ANALYZE?.trim().toLowerCase() ?? "";
-  if (!v) return true;
-  return !["0", "false", "no", "off"].includes(v);
-}
-
-function tenderAnchorHintReply() {
-  const user = botUsernameNorm.trim();
-  const at = user ? `@${user}` : "@username_бота";
-  return [
-    "Неясно, о какой закупке речь.",
-    "",
-    "В общем чате:",
-    `• обращайтесь к Лене явно — ${at} в тексте (или упоминание через меню);`,
-    "• чтобы не перепутать тендеры, продолжайте **«Ответить»** на сообщение Лены по нужной закупке **или** укажите **номер закупки** (например 1336119), либо ссылку IceTrade …/tenders/all/view/<номер>;",
-    "• надёжно: **/tenderask <tender_id> …** — tender_id задаётся в команде.",
-  ].join("\n");
-}
-
-function errorsIndicateDriveServiceAccountQuota(errors) {
-  return errors.some((e) =>
-    /storageQuotaExceeded|Service Accounts do not have storage quota/i.test(String(e)),
-  );
+/**
+ * Разговорная реплика (кто ты, что умеешь, спасибо…) — без LLM и без якоря тендера.
+ * @returns {Promise<boolean>}
+ */
+async function handleConversationTurn(chatId, replyTo, text) {
+  const intent = classifyConversationIntent(normalizeConversationText(text));
+  if (!intent) return false;
+  await sendText(chatId, replyTo, buildConversationReply(intent, { botUsername: botUsernameNorm }));
+  return true;
 }
 
 /**
- * Короткая строка для Telegram вместо полотна JSON от Drive.
- * @param {unknown} err
+ * Импорт карточки IceTrade → Drive (группа и личка; в группе не требует @бота, если в тексте есть ссылка).
+ * @returns {Promise<boolean>}
  */
-function shortenIceTradeBootstrapError(err) {
-  const s = String(err);
-  const drive403 =
-    /Drive upload 403|storageQuotaExceeded|Service Accounts do not have storage quota/i.test(s);
-  const urlMatch = s.match(/^https?:\/\/[^\s]+/);
-  if (drive403 && urlMatch) {
-    return `${urlMatch[0]} — **Drive 403** (нет квоты у SA на этот корень → **Shared drive**).`;
-  }
-  if (drive403) {
-    return "**Drive 403** — сервисный аккаунт не может писать: корень должен быть на **общем диске**.";
-  }
-  if (s.length > 380) return `${s.slice(0, 380)}…`;
-  return s;
-}
+async function handleIceTradeBootstrap(chatId, replyTo, text) {
+  const ids = extractIceTradeViewIds(text);
+  if (ids.length === 0) return false;
 
-/**
- * Что проверить в `.env`, если с IceTrade не скачались вложения (HTML вместо PDF и т.п.).
- * @param {{ uploaded: unknown[], candidateUrls: unknown[], cardFetchVia?: string }} r
- */
-function iceTradeSessionEnvHint(r) {
-  const lines = [
-    "**Если вложения не качаются (в т.ч. «HTML вместо PDF» в предупреждениях):**",
-    "• Опционально **как у браузера**: **LENA_ICETRADE_COOKIE** (заголовок Cookie из DevTools) или **LENA_ICETRADE_PLAYWRIGHT_STORAGE** после `npm run icetrade:playwright-auth` — помогает, если площадка режет «голый» fetch. ЛК для публичных карточек обычно не обязателен.",
-  ];
-  lines.push("• Тяжёлая карточка IceTrade: **LENA_ICETRADE_PLAYWRIGHT=1** и `npx playwright install chromium` (перезапуск бота после смены `.env`).");
-  if (r.cardFetchVia === "playwright") {
-    lines.push(
-      "• Уже идёт Playwright; если файлы всё равно не бинарники — увеличьте **LENA_ICETRADE_PLAYWRIGHT_DOWNLOAD_PRIME_MS**, **LENA_ICETRADE_FETCH_TIMEOUT_MS**, **LENA_ICETRADE_PLAYWRIGHT_SETTLE_MS**; при необходимости снимите **Cookie** из браузера или обновите **STORAGE**.",
-    );
-  } else {
-    lines.push(
-      "• Сейчас карточка **без** Playwright — для подгрузки документов включите **LENA_ICETRADE_PLAYWRIGHT=1**, затем снова пришлите ссылку.",
+  const first = ids[0];
+  /** @type {number | undefined} */
+  let progressMid;
+  try {
+    assertCredentialsFile();
+    const importOnly = telegramIceTradeImportOnlyEnabled();
+    progressMid = await sendText(chatId, replyTo, iceTradeImportProgressMessage(first, importOnly));
+    const stopPulse = startChatActionPulse(chatId, chatActionForIceTradeImport());
+    try {
+      const { markdown, viewId } = await runIceTradeImportForMarkdown({ rootId, messageText: text });
+      const cbData = `${CB_PARSE_PREFIX}${viewId}`;
+      /** @type {Record<string, unknown> | undefined} */
+      const parseKeyboard =
+        cbData.length <= 64
+          ? {
+              inline_keyboard: [[{ text: "Анализ документов", callback_data: cbData }]],
+            }
+          : undefined;
+      if (!parseKeyboard) {
+        console.error(`[lena-bot] callback_data > 64 B, кнопка парсинга не добавлена (${cbData.length})`);
+      }
+      const chainAnchor = typeof progressMid === "number" ? progressMid : replyTo;
+      await sendTextChunks(chatId, chainAnchor, markdown, parseKeyboard);
+    } finally {
+      stopPulse();
+    }
+  } catch (e) {
+    const err = e instanceof Error ? e.message : String(e);
+    const errAnchor = typeof progressMid === "number" ? progressMid : replyTo;
+    await sendTextChunks(
+      chatId,
+      errAnchor,
+      [
+        `IceTrade ${first}: не удалось выполнить bootstrap на Drive.`,
+        err.slice(0, 1200),
+        "",
+        "Проверьте учётные данные Google Drive (OAuth или GOOGLE_DRIVE_CREDENTIALS) и **LENA_DRIVE_ROOT**.",
+        `Вручную: \`node src/cli.js tenders icetrade-bootstrap <root> "${first}"\``,
+      ].join("\n"),
     );
   }
-  return lines.join("\n");
-}
-
-/**
- * @param {string[]} errors
- */
-function formatIceTradeErrorsForTelegram(errors) {
-  if (errors.length === 0) return "";
-  if (errorsIndicateDriveServiceAccountQuota(errors)) {
-    const urls = [];
-    for (const e of errors) {
-      const m = String(e).match(/^https?:\/\/[^\s]+/);
-      if (m) urls.push(m[0]);
-    }
-    const unique = [...new Set(urls)];
-    if (unique.length > 0) {
-      return [
-        "",
-        "**Предупреждения:**",
-        "Сервисный аккаунт **не может загрузить файлы** в текущий корень Drive (**403, нет квоты у SA**). С **IceTrade** загрузка ссылок прошла — сбой только при записи в **inputs**.",
-        "",
-        `Уникальных вложений: **${unique.length}**. Примеры:`,
-        ...unique.slice(0, 4).map((u) => `• ${u}`),
-        unique.length > 4 ? `• … и ещё ${unique.length - 4}` : "",
-        "",
-        "**Что сделать:** перенесите корень «Лены» на **Google Shared drive**, добавьте **client_email** из JSON ключа участником (редактор), обновите **LENA_DRIVE_ROOT** и повторите ссылку.",
-        "Кратко: docs/GOOGLE_DRIVE.md (общие диски).",
-      ]
-        .filter(Boolean)
-        .join("\n");
-    }
-  }
-  return `\n\nПредупреждения (до 6):\n${errors
-    .slice(0, 6)
-    .map((e) => `• ${shortenIceTradeBootstrapError(e)}`)
-    .join("\n")}`;
+  return true;
 }
 
 /**
@@ -393,142 +911,14 @@ function formatIceTradeErrorsForTelegram(errors) {
  * @returns {Promise<boolean>}
  */
 async function handlePlainMention(chatId, replyTo, text, chatType, msg) {
-  if (!messageAddressesBot(text, chatType, msg)) return false;
-
   const ids = extractIceTradeViewIds(text);
   if (ids.length > 0) {
-    const first = ids[0];
-    try {
-      assertCredentialsFile();
-      await sendText(
-        chatId,
-        replyTo,
-        `IceTrade **${first}**: создаю папку тендера на Drive, сохраняю **inputs/icetrade-import-snapshot.json** (поля карточки и события) и пробую скачать вложения в **inputs**…`,
-      );
-      const r = await bootstrapIceTradeToDrive(rootId, text, {});
-      const noteName =
-        r.noteFile && typeof r.noteFile === "object" && r.noteFile !== null && "name" in r.noteFile
-          ? String(/** @type {{ name?: string }} */ (r.noteFile).name ?? "")
-          : "";
-      const snapFile = r.importSnapshotFile;
-      const snapMeta =
-        snapFile && typeof snapFile === "object" && snapFile !== null && "name" in snapFile
-          ? /** @type {{ name?: string; webViewLink?: string }} */ (snapFile)
-          : null;
-      const driveSaQuota = errorsIndicateDriveServiceAccountQuota(r.errors);
-      const errTail = formatIceTradeErrorsForTelegram(r.errors);
-
-      let analysisTail = "";
-      if (icetradeAnalyzeEnabled()) {
-        if (isLlmConfigured()) {
-          try {
-            const ar = await analyzeTenderAfterBootstrap(rootId, r.viewId, {});
-            analysisTail = `\n\n${formatIceTradeAnalysisForTelegram(ar)}`;
-          } catch (ae) {
-            const am = ae instanceof Error ? ae.message : String(ae);
-            analysisTail = `\n\n**Анализ комплекта:** ошибка — ${am.slice(0, 800)}`;
-          }
-        } else {
-          analysisTail =
-            "\n\n_(Анализ комплекта по inputs не запущен: задайте OPENAI_API_KEY или LENA_OPENAI_API_KEY.)_";
-        }
-      }
-      if (driveSaQuota && r.uploaded.length === 0 && icetradeAnalyzeEnabled()) {
-        analysisTail += `\n\n_Блок «анализ» выше опирается на **inputs** на Drive; пока **403 SA**, там пусто — после **Shared drive** пришлите ссылку снова._`;
-      }
-
-      let extractTail = "";
-      if (telegramExtractAfterBootstrapEnabled() && r.uploaded.length > 0) {
-        try {
-          const ex = await extractTenderInputDocumentsToExtracted(rootId, r.viewId, {});
-          const okN = ex.items.filter((i) => i.chars > 0 && !i.error).length;
-          const modeHint =
-            ex.mode === "native_only"
-              ? "Режим **native_only**: **inputs/extracted/** не создана; статусы → **`tender-pipeline-state.json`** в корне тендера."
-              : "Режим **extracted_workspace**: тексты в **inputs/extracted/**; **`extract-manifest.json`** + **`tender-pipeline-state.json`**.";
-          extractTail = `\n\n**Парсинг inputs:** с текстом **${okN}** / ${ex.items.length}. ${modeHint}`;
-        } catch (ee) {
-          extractTail = `\n\n**Парсинг inputs:** ошибка — ${(ee instanceof Error ? ee.message : String(ee)).slice(0, 500)}`;
-        }
-      }
-
-      let cardTail = "";
-      if (telegramCardAfterBootstrapEnabled() && isLlmConfigured() && r.uploaded.length > 0) {
-        try {
-          const cr = await buildTenderTelegramCard(rootId, r.viewId, { runExtract: false });
-          cardTail = `\n\n---\n\n${formatTenderTelegramCardForTelegram(cr)}`;
-          if (cr.ok && cr.noteFile?.name) {
-            cardTail += `\n\nКарточка в **notes**: \`${cr.noteFile.name}\``;
-          }
-          if (cr.ok && cr.noteUploadError) {
-            cardTail += `\n\n_(Заметка на Drive: ${String(cr.noteUploadError).slice(0, 400)})_`;
-          }
-        } catch (ce) {
-          const msg = ce instanceof Error ? ce.message : String(ce);
-          cardTail = `\n\n_(Карточка тендера: ${msg.slice(0, 500)})_`;
-        }
-      }
-
-      const lines = [
-        `Готово: закупка **${r.viewId}** на Drive (**tender_id** = номер на IceTrade).`,
-        "",
-        ...(r.tenderRootWebViewLink ? [`**Папка тендера (Google Drive):** ${r.tenderRootWebViewLink}`] : []),
-        ...(r.inputsFolderWebViewLink ? [`**Документы заказчика (папка inputs):** ${r.inputsFolderWebViewLink}`] : []),
-        ...(r.tenderRootWebViewLink || r.inputsFolderWebViewLink ? [""] : []),
-        `**Карточка (HTML):** ${r.cardFetchVia ? `получена через **${r.cardFetchVia}**` : "—"}.`,
-        "",
-        `**inputs:** загружено файлов — **${r.uploaded.length}**${r.uploaded.length ? `: ${r.uploaded.map((x) => x.name).join(", ")}` : ""}.`,
-        snapMeta?.name
-          ? `**Снимок импорта:** \`inputs/${snapMeta.name}\`${snapMeta.webViewLink ? ` — ${snapMeta.webViewLink}` : ""}.`
-          : "_**Снимок импорта** (`inputs/icetrade-import-snapshot.json`): не удалось подтвердить загрузку — см. предупреждения ниже._",
-        r.uploaded.length === 0 && r.candidateUrls.length === 0
-          ? [
-              "На HTML-карточке не нашлось прямых ссылок (часто вложения только в DOM/XHR или рендер Playwright). Положите комплект в **inputs** вручную при необходимости.",
-              r.cardFetchVia === "playwright"
-                ? iceTradeSessionEnvHint(r)
-                : "_(Для Chromium: **LENA_ICETRADE_PLAYWRIGHT=1** в `.env` и перезапуск бота; значения **LENA_…** и **GOOGLE_DRIVE_…** из `.env` теперь перебивают переменные Windows.)_",
-            ]
-              .filter((x) => x && String(x).trim())
-              .join("\n\n")
-          : r.uploaded.length === 0 && driveSaQuota && r.candidateUrls.length > 0
-            ? "Вложения с площадки **распознаны** (есть прямые ссылки), но **Google Drive не принял загрузку**: у сервисного аккаунта **нет квоты** на текущий корень. Перенесите **LENA_DRIVE_ROOT** на **общий диск (Shared drive)** и добавьте ключ SA участником — см. **docs/GOOGLE_DRIVE.md**."
-            : r.uploaded.length === 0
-              ? [
-                  "Ссылки-кандидаты есть, но автоматически скачать не получилось — см. заметку в **notes** и при необходимости скачайте вручную.",
-                  iceTradeSessionEnvHint(r),
-                ].join("\n\n")
-              : "",
-        "",
-        noteName
-          ? `В **notes**: \`${noteName}\` — список того, что **нужно запросить у менеджера** (Лена не подготовит сама без этих данных/файлов).`
-          : `В **notes** добавлена заметка bootstrap с чеклистом для менеджера.`,
-        "",
-        `Дальше: **/tenderextract ${r.viewId}** (если добавите файлы — повторить), **/tendercard ${r.viewId}** (карточка по тексту из inputs или **inputs/extracted**), **/tenderask** … или **/bundle**.`,
-        errTail,
-        analysisTail,
-        extractTail,
-        cardTail,
-      ].filter(Boolean);
-      await sendTextChunks(chatId, replyTo, lines.join("\n"));
-    } catch (e) {
-      const err = e instanceof Error ? e.message : String(e);
-      await sendTextChunks(
-        chatId,
-        replyTo,
-        [
-          `IceTrade ${first}: не удалось выполнить bootstrap на Drive.`,
-          err.slice(0, 1200),
-          "",
-          "Проверьте GOOGLE_DRIVE_CREDENTIALS и корень LENA_DRIVE_ROOT.",
-          `Вручную: \`node src/cli.js tenders icetrade-bootstrap <root> "${first}"\``,
-        ].join("\n"),
-      );
-    }
-    return true;
+    return handleIceTradeBootstrap(chatId, replyTo, text);
   }
 
-  const stripped = text.replace(/@\w+/g, " ").replace(/\s+/g, " ").trim();
-  if (isBriefGreeting(stripped)) {
+  const isGroup = chatType === "group" || chatType === "supergroup";
+  const stripped = normalizeConversationText(text);
+  if (isBriefGreeting(stripped) && (chatType === "private" || isGroup)) {
     await sendText(
       chatId,
       replyTo,
@@ -537,10 +927,7 @@ async function handlePlainMention(chatId, replyTo, text, chatType, msg) {
     return true;
   }
 
-  if (chatType === "private") return false;
-
-  await sendText(chatId, replyTo, tenderAnchorHintReply());
-  return true;
+  return false;
 }
 
 /**
@@ -589,13 +976,36 @@ function resolvedRagIndexDir() {
 }
 
 /**
+ * Убирает markdown-символы из текста: в Telegram без parse_mode ** ` _ не превращаются в оформление.
+ * @param {string} text
+ */
+function stripAssistantMarkdownForTelegram(text) {
+  let s = String(text ?? "");
+  s = s.replace(/\r\n/g, "\n");
+  s = s.replace(/^#{1,6}\s+/gm, "");
+  for (let pass = 0; pass < 6; pass++) {
+    const next = s
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/__([^_]+)__/g, "$1")
+      .replace(/`([^`]+)`/g, "$1");
+    if (next === s) break;
+    s = next;
+  }
+  s = s.replace(/(^|[\s>"'(,:])_([^_\n]+)_([\s)<"',.:!?]|$)/g, "$1$2$3");
+  return s;
+}
+
+/**
  * @param {number} chatId
  * @param {number} [replyTo]
  * @param {string} text
+ * @param {Record<string, unknown>} [replyMarkup] — объект **reply_markup** для Telegram (`{ inline_keyboard: … }`) или обёртка `{ reply_markup: … }` (обе формы поддерживаются)
+ * @returns {Promise<number | undefined>} message_id отправленного сообщения
  */
-async function sendText(chatId, replyTo, text) {
+async function sendText(chatId, replyTo, text, replyMarkup) {
   const max = 3900;
-  const chunk = text.length <= max ? text : `${text.slice(0, max)}\n\n…(обрезано)`;
+  const cleaned = stripAssistantMarkdownForTelegram(text);
+  const chunk = cleaned.length <= max ? cleaned : `${cleaned.slice(0, max)}\n\n…(обрезано)`;
   /** @type {Record<string, unknown>} */
   const body = {
     chat_id: chatId,
@@ -604,30 +1014,779 @@ async function sendText(chatId, replyTo, text) {
   };
   if (replyTo != null && replyTo !== undefined) body.reply_to_message_id = replyTo;
   if (typeof outboundMessageThreadId === "number") body.message_thread_id = outboundMessageThreadId;
-  await tgJson("sendMessage", body);
+  if (replyMarkup && typeof replyMarkup === "object") {
+    const wrapped = /** @type {{ reply_markup?: unknown }} */ (replyMarkup).reply_markup;
+    body.reply_markup = wrapped !== undefined && wrapped !== null ? wrapped : replyMarkup;
+  }
+  let data;
+  try {
+    data = await tgJson("sendMessage", body);
+  } catch (e) {
+    if (replyTo != null && replyTo !== undefined && isReplyTargetMissingTelegramError(e)) {
+      delete body.reply_to_message_id;
+      if (process.env.LENA_TELEGRAM_DEBUG?.trim() === "1") {
+        console.error("[lena-bot] sendMessage: сообщение для reply удалено или недоступно — повтор без reply_to.");
+      }
+      data = await tgJson("sendMessage", body);
+    } else {
+      throw e;
+    }
+  }
+  const result = /** @type {{ message_id?: number }} */ (data.result ?? {});
+  return typeof result.message_id === "number" ? result.message_id : undefined;
 }
 
 /**
  * Несколько сообщений, если текст длиннее лимита Telegram (~4096).
+ * Каждый следующий чанк — ответ на предыдущий (линейная цепочка от replyTo).
  * @param {number} chatId
- * @param {number} [replyTo]
+ * @param {number} [replyTo] — первая опора цепочки (напр. исходное сообщение со ссылкой IceTrade)
  * @param {string} text
+ * @param {Record<string, unknown>} [replyMarkupLast] — только на последний чанк
+ * @returns {Promise<number | undefined>} message_id последнего отправленного чанка
  */
-async function sendTextChunks(chatId, replyTo, text) {
+async function sendTextChunks(chatId, replyTo, text, replyMarkupLast) {
   const max = 3800;
   if (text.length <= max) {
-    await sendText(chatId, replyTo, text);
-    return;
+    return sendText(chatId, replyTo, text, replyMarkupLast);
   }
   let i = 0;
   let part = 0;
+  /** @type {number | undefined} */
+  let chainTo = replyTo;
+  /** @type {number | undefined} */
+  let lastMid;
   while (i < text.length) {
     const slice = text.slice(i, i + max);
     i += max;
     part += 1;
     const prefix = part > 1 ? `(продолжение ${part})\n` : "";
-    await sendText(chatId, part === 1 ? replyTo : undefined, `${prefix}${slice}`);
+    const isLast = i >= text.length;
+    const mid = await sendText(
+      chatId,
+      chainTo,
+      `${prefix}${slice}`,
+      isLast ? replyMarkupLast : undefined,
+    );
+    if (typeof mid === "number") {
+      chainTo = mid;
+      lastMid = mid;
+    }
   }
+  return lastMid;
+}
+
+/**
+ * Сохраняет значение текущего шага мастера, переходит к следующему или финализирует и шлёт клавиатуру организаций.
+ * @param {number} chatId
+ * @param {number | undefined} chainReplyTo
+ * @param {{ flow: "parse" | "kp", token: string }} ref
+ * @param {ParseOrgPending | KpOrgPending} pending
+ * @param {string} value — текст для текущего `wiz.step`
+ */
+async function advanceManagerPriceWizard(chatId, chainReplyTo, ref, pending, value) {
+  const wiz = pending.managerPriceWizard;
+  if (!wiz) return;
+
+  const tenderId = pending.tenderId;
+  const treeOpts = pending.opts;
+  const token = ref.token;
+  const step = wiz.step;
+  const v = String(value ?? "").trim();
+
+  if (step === "price") wiz.price = v;
+  else if (step === "payment") wiz.payment = v;
+  else if (step === "delivery") wiz.delivery = v;
+  else wiz.warranty = v;
+
+  unregisterManagerPriceAnchorsForToken(token);
+
+  const nextStep = managerPriceWizardNextStep(step);
+  if (nextStep) {
+    wiz.step = nextStep;
+    pending.ts = Date.now();
+    await sendText(chatId, chainReplyTo, "Принято.");
+    const body = buildManagerPriceWizardStepBody(tenderId, nextStep, wiz);
+    const kb = buildManagerPriceWizardStarterKeyboard(token, nextStep, wiz);
+    const nextMid = await sendText(chatId, chainReplyTo, body, kb ? { reply_markup: kb } : undefined);
+    if (typeof nextMid === "number") {
+      registerManagerPriceAnchor(chatId, nextMid, ref);
+    }
+    return;
+  }
+
+  assertCredentialsFile();
+  const { tender } = await ensureTenderTree(rootId, tenderId, treeOpts);
+  const stamp = new Date().toISOString();
+  const fileBody = assembleManagerPriceQuoteMarkdown(wiz, tenderId, "telegram-reply", stamp);
+  await replaceManagerPriceQuoteFile(tender.notesId, fileBody);
+
+  pending.kpGatePhase = "ready";
+  pending.managerPriceWizard = null;
+  pending.ts = Date.now();
+
+  if (ref.flow === "parse") {
+      await sendText(
+      chatId,
+      chainReplyTo,
+      `Условия сохранены → notes/${MANAGER_PRICE_QUOTE_FILENAME}. Выберите компанию и нажмите «Сформировать КП».`,
+      { reply_markup: buildParseOrgInlineKeyboard(token, null) },
+    );
+  } else {
+    await sendText(
+      chatId,
+      chainReplyTo,
+      `Условия сохранены. Выберите организацию и «Сформировать КП».`,
+      { reply_markup: buildKpOrgInlineKeyboard(token, null) },
+    );
+  }
+}
+
+/**
+ * После Analysis: при активном gate сначала запрос цены, затем кнопки организации.
+ * @param {number} chatId
+ * @param {number | undefined} chainReplyTo
+ * @param {string} analysisMd
+ * @param {string} pToken
+ * @param {string} tenderId
+ * @param {{ flat?: boolean, year?: string }} opts
+ */
+async function sendAnalysisResultThenMaybePriceGate(chatId, chainReplyTo, analysisMd, pToken, tenderId, opts) {
+  pruneParseOrgPendingMap();
+  const gateOn = !managerPriceGateDisabled();
+  const wizForGate = gateOn ? newManagerPriceWizardState(analysisMd) : null;
+  parseOrgPending.set(pToken, {
+    tenderId,
+    opts,
+    chatId,
+    ts: Date.now(),
+    selected: null,
+    kpGatePhase: gateOn ? "awaiting_manager_price" : "ready",
+    managerPriceWizard: wizForGate,
+  });
+
+  const footerBase = `${analysisMd}\n\nДальше: в Telegram четыре коротких шага (цена → оплата → срок → гарантия), затем выбор компании. Или одним сообщением: /tenderprice ${tenderId} …`;
+
+  if (!gateOn) {
+    await sendTextChunks(chatId, chainReplyTo, footerBase, buildParseOrgInlineKeyboard(pToken, null));
+    return;
+  }
+
+  const lastMid = await sendTextChunks(chatId, chainReplyTo, footerBase, undefined);
+  const gateText = buildManagerPriceWizardFirstMessageText(tenderId, analysisMd, wizForGate);
+  const gateKb = buildManagerPriceWizardStarterKeyboard(pToken, "price", wizForGate);
+  const gateMid = await sendText(chatId, lastMid ?? chainReplyTo, gateText, gateKb ? { reply_markup: gateKb } : undefined);
+  const pend = parseOrgPending.get(pToken);
+  if (pend && typeof gateMid === "number") {
+    registerManagerPriceAnchor(chatId, gateMid, { flow: "parse", token: pToken });
+  }
+}
+
+/**
+ * Ответ «Ответить» на якорь с запросом цены → Drive → кнопки организации.
+ * @param {Record<string, unknown>} msg
+ * @param {string} bodyText
+ * @param {number} chatId
+ * @param {number} replyToMsgId
+ */
+async function tryConsumeManagerPriceGateReply(msg, bodyText, chatId, replyToMsgId) {
+  const rtObj = /** @type {{ message_id?: number } | undefined} */ (
+    /** @type {Record<string, unknown>} */ (msg).reply_to_message
+  );
+  const rt = typeof rtObj?.message_id === "number" ? rtObj.message_id : null;
+  if (rt == null) return false;
+
+  const ttrim = bodyText.trim();
+  if (!ttrim || ttrim.startsWith("/")) return false;
+
+  const ref = managerPriceAnchorByMessage.get(`${chatId}:${rt}`);
+  if (!ref) return false;
+
+  const token = ref.token;
+  /** @type {ParseOrgPending | KpOrgPending | undefined} */
+  let pending;
+  if (ref.flow === "parse") {
+    pending = parseOrgPending.get(token);
+    if (!pending || pending.chatId !== chatId || pending.kpGatePhase !== "awaiting_manager_price") {
+      managerPriceAnchorByMessage.delete(`${chatId}:${rt}`);
+      return false;
+    }
+  } else {
+    pending = kpOrgPending.get(token);
+    if (!pending || pending.chatId !== chatId || pending.kpGatePhase !== "awaiting_manager_price") {
+      managerPriceAnchorByMessage.delete(`${chatId}:${rt}`);
+      return false;
+    }
+  }
+
+  if (!pending.managerPriceWizard) {
+    pending.managerPriceWizard = newManagerPriceWizardState("");
+  }
+
+  managerPriceAnchorByMessage.delete(`${chatId}:${rt}`);
+  await advanceManagerPriceWizard(chatId, replyToMsgId, ref, pending, ttrim);
+  return true;
+}
+
+/**
+ * @param {string} rest — текст после /tenderprice
+ * @returns {{ tenderId: string, opts: { flat?: boolean, year?: string }, priceText: string } | null}
+ */
+function parseTenderPriceCommand(rest) {
+  const parts = rest.trim().split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return null;
+  const tenderId = parts[0];
+  if (!/^\d{4,15}$/.test(tenderId)) return null;
+  let i = 1;
+  /** @type {{ flat?: boolean, year?: string }} */
+  const opts = {};
+  if (/^\d{4}$/.test(parts[i] ?? "")) {
+    opts.year = parts[i];
+    i += 1;
+  } else if ((parts[i] ?? "").toLowerCase() === "flat") {
+    opts.flat = true;
+    i += 1;
+  }
+  const priceText = parts.slice(i).join(" ").trim();
+  if (!priceText) return null;
+  return { tenderId, opts, priceText };
+}
+
+/**
+ * @param {number} chatId
+ * @param {number | undefined} replyTo
+ * @param {string} rest
+ */
+async function cmdTenderPrice(chatId, replyTo, rest) {
+  const parsed = parseTenderPriceCommand(rest);
+  if (!parsed) {
+    await sendText(
+      chatId,
+      replyTo,
+      "Использование: /tenderprice <tender_id> [ГГГГ|flat] <весь текст условий одним сообщением> — обходит мастер; валюта и НДС — как в вашем тексте и документах закупки.",
+    );
+    return;
+  }
+  assertCredentialsFile();
+  const { tender } = await ensureTenderTree(rootId, parsed.tenderId, parsed.opts);
+  const stamp = new Date().toISOString();
+  const fileBody = [
+    "---",
+    "lena: manager-price-quote",
+    "source: telegram-command",
+    `tender_id: ${parsed.tenderId}`,
+    `saved_at: ${stamp}`,
+    "pricing_note: Single Telegram message; currency/VAT per text below and procurement docs",
+    "---",
+    "",
+    "## Коммерческие условия (одним сообщением, /tenderprice)",
+    "",
+    parsed.priceText,
+    "",
+  ].join("\n");
+  await replaceManagerPriceQuoteFile(tender.notesId, fileBody);
+
+  let notified = false;
+  const pTok = findParseOrgAwaitingPriceForTender(chatId, parsed.tenderId);
+  if (pTok) {
+    unregisterManagerPriceAnchorsForToken(pTok);
+    const p = parseOrgPending.get(pTok);
+    if (p) {
+      p.kpGatePhase = "ready";
+      p.managerPriceWizard = null;
+      p.ts = Date.now();
+    }
+    await sendText(
+      chatId,
+      replyTo,
+      `Условия сохранены (/tenderprice). Выберите компанию и «Сформировать КП».`,
+      { reply_markup: buildParseOrgInlineKeyboard(pTok, null) },
+    );
+    notified = true;
+  }
+  const kTok = findKpOrgAwaitingPriceForTender(chatId, parsed.tenderId);
+  if (kTok) {
+    unregisterManagerPriceAnchorsForToken(kTok);
+    const p = kpOrgPending.get(kTok);
+    if (p) {
+      p.kpGatePhase = "ready";
+      p.managerPriceWizard = null;
+      p.ts = Date.now();
+    }
+    await sendText(
+      chatId,
+      replyTo,
+      `Условия сохранены (/tenderprice). Выберите организацию и «Сформировать КП».`,
+      { reply_markup: buildKpOrgInlineKeyboard(kTok, null) },
+    );
+    notified = true;
+  }
+  if (!notified) {
+    await sendText(
+      chatId,
+      replyTo,
+      `Условия сохранены → notes/${MANAGER_PRICE_QUOTE_FILENAME}. Если ждёте кнопок после парсинга или /tenderkp, укажите тот же tender_id.`,
+    );
+  }
+}
+
+/**
+ * Inline-кнопки (callback_query): парсинг **inputs/** после импорта.
+ * @param {Record<string, unknown>} cq
+ */
+async function handleCallbackQuery(cq) {
+  const id = String(cq.id ?? "");
+  const data = typeof cq.data === "string" ? cq.data : "";
+  const msg = /** @type {{ text?: string; chat?: { id: number; type?: string }; message_id?: number; message_thread_id?: number } | undefined} */ (
+    cq.message
+  );
+  if (!id || !msg?.chat || typeof msg.chat.id !== "number") {
+    if (id) await answerCallbackQuery(id).catch(() => {});
+    return;
+  }
+  const chatId = msg.chat.id;
+  if (allowedChats && !allowedChats.has(String(chatId))) {
+    await answerCallbackQuery(id).catch(() => {});
+    return;
+  }
+  const t = msg.chat.type;
+  if (t !== "private" && t !== "group" && t !== "supergroup") {
+    await answerCallbackQuery(id).catch(() => {});
+    return;
+  }
+  outboundMessageThreadId = undefined;
+  if ((t === "supergroup" || t === "group") && typeof msg.message_thread_id === "number") {
+    outboundMessageThreadId = msg.message_thread_id;
+  }
+  const replyTo = typeof msg.message_id === "number" ? msg.message_id : undefined;
+  if (replyTo == null) {
+    await answerCallbackQuery(id).catch(() => {});
+    return;
+  }
+  const msgId = replyTo;
+
+  if (data.startsWith(CB_MGR_WIZ)) {
+    const rest = data.slice(CB_MGR_WIZ.length);
+    const parts = rest.split(":");
+    if (parts.length !== 3) {
+      await answerCallbackQuery(id).catch(() => {});
+      return;
+    }
+    const [wizToken, stepCode, action] = parts;
+    /** @type {ManagerPriceWizardStep | undefined} */
+    const wizStep = MGR_WIZ_CODE_TO_STEP[stepCode];
+    if (!wizToken || !wizStep || (action !== "0" && action !== "1")) {
+      await answerCallbackQuery(id).catch(() => {});
+      return;
+    }
+
+    let pending = parseOrgPending.get(wizToken);
+    /** @type {"parse" | "kp"} */
+    let flow = "parse";
+    if (!pending) {
+      pending = kpOrgPending.get(wizToken);
+      flow = "kp";
+    }
+    if (!pending || pending.chatId !== chatId || pending.kpGatePhase !== "awaiting_manager_price") {
+      await answerCallbackQuery(id, "Запрос устарел.", true);
+      return;
+    }
+    const wizState = pending.managerPriceWizard;
+    if (!wizState || wizState.step !== wizStep) {
+      await answerCallbackQuery(id, "Шаг уже не актуален — смотрите последнее сообщение Лены.", true);
+      return;
+    }
+
+    const rawHint = wizState.embeddedHints?.[wizStep] ?? "";
+
+    if (action === "1") {
+      await answerCallbackQuery(id, "Ответьте «Ответить» на это сообщение своим текстом.");
+      try {
+        /** @type {Record<string, unknown>} */
+        const rmBody = {
+          chat_id: chatId,
+          message_id: msgId,
+          reply_markup: { inline_keyboard: [] },
+        };
+        if (typeof outboundMessageThreadId === "number") rmBody.message_thread_id = outboundMessageThreadId;
+        await tgJson("editMessageReplyMarkup", rmBody);
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+
+    if (!managerStepQualifiesForDocStarter(wizStep, rawHint)) {
+      await answerCallbackQuery(id, "В тексте не нашла строку для подстановки — введите условия текстом.", true);
+      return;
+    }
+
+    await answerCallbackQuery(id, "Подставлено из документов.");
+    try {
+      /** @type {Record<string, unknown>} */
+      const rmBody = {
+        chat_id: chatId,
+        message_id: msgId,
+        reply_markup: { inline_keyboard: [] },
+      };
+      if (typeof outboundMessageThreadId === "number") rmBody.message_thread_id = outboundMessageThreadId;
+      await tgJson("editMessageReplyMarkup", rmBody);
+    } catch {
+      /* ignore */
+    }
+
+    await advanceManagerPriceWizard(chatId, msgId, { flow, token: wizToken }, pending, wrapPrefilledFromDocs(rawHint));
+    return;
+  }
+
+  if (data.startsWith(CB_KP_ORG_SELECT)) {
+    const rest = data.slice(CB_KP_ORG_SELECT.length);
+    const lastColon = rest.lastIndexOf(":");
+    if (lastColon <= 0) {
+      await answerCallbackQuery(id).catch(() => {});
+      return;
+    }
+    const token = rest.slice(0, lastColon).trim();
+    const orgIdx = Number.parseInt(rest.slice(lastColon + 1).trim(), 10);
+    pruneKpOrgPendingMap();
+    const pending = kpOrgPending.get(token);
+    if (!pending || pending.chatId !== chatId) {
+      await answerCallbackQuery(id, "Запрос устарел. Повторите /tenderkp", true);
+      return;
+    }
+    if (Date.now() - pending.ts > KP_ORG_PENDING_TTL_MS) {
+      kpOrgPending.delete(token);
+      await answerCallbackQuery(id, "Запрос устарел. Повторите /tenderkp", true);
+      return;
+    }
+    if (!kpGateIsReady(pending)) {
+      await answerCallbackQuery(
+        id,
+        "Сначала завершите мастер условий (4 ответа Лене) или /tenderprice …",
+        true,
+      );
+      return;
+    }
+    if (orgIdx !== 0 && orgIdx !== 1) {
+      await answerCallbackQuery(id).catch(() => {});
+      return;
+    }
+    pending.selected = orgIdx === 0 ? "gs_retail" : "finselvat";
+    pending.ts = Date.now();
+    const label = OFFER_ORG[pending.selected].label;
+    await answerCallbackQuery(id, `Выбрано: ${label}`);
+    try {
+      /** @type {Record<string, unknown>} */
+      const rmBody = {
+        chat_id: chatId,
+        message_id: msgId,
+        reply_markup: buildKpOrgInlineKeyboard(token, pending.selected),
+      };
+      if (typeof outboundMessageThreadId === "number") rmBody.message_thread_id = outboundMessageThreadId;
+      await tgJson("editMessageReplyMarkup", rmBody);
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
+
+  if (data.startsWith(CB_KP_ORG_GO)) {
+    const token = data.slice(CB_KP_ORG_GO.length).trim();
+    pruneKpOrgPendingMap();
+    const pending = kpOrgPending.get(token);
+    if (!pending || pending.chatId !== chatId) {
+      await answerCallbackQuery(id, "Запрос устарел. Повторите /tenderkp", true);
+      return;
+    }
+    if (Date.now() - pending.ts > KP_ORG_PENDING_TTL_MS) {
+      kpOrgPending.delete(token);
+      await answerCallbackQuery(id, "Запрос устарел. Повторите /tenderkp", true);
+      return;
+    }
+    if (!kpGateIsReady(pending)) {
+      await answerCallbackQuery(
+        id,
+        "Сначала завершите мастер условий (4 ответа Лене) или /tenderprice …",
+        true,
+      );
+      return;
+    }
+    if (!pending.selected) {
+      await answerCallbackQuery(id, "Сначала выберите компанию", true);
+      return;
+    }
+    if (kpOrgGoConsumed.has(token)) {
+      await answerCallbackQuery(id, "Уже выполняется…", true);
+      return;
+    }
+    kpOrgGoConsumed.add(token);
+    kpOrgPending.delete(token);
+    unregisterManagerPriceAnchorsForToken(token);
+
+    const tenderId = pending.tenderId;
+    const treeOpts = pending.opts;
+    const offerOrg = pending.selected;
+    const orgLabel = OFFER_ORG[offerOrg].label;
+
+    await answerCallbackQuery(id, "Формирую черновик…");
+
+    const headText = `КП ${tenderId}\n\nКомпания: ${orgLabel}\n\nФормирую черновик…`;
+    try {
+      /** @type {Record<string, unknown>} */
+      const editBody = {
+        chat_id: chatId,
+        message_id: msgId,
+        text: headText,
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: [] },
+      };
+      if (typeof outboundMessageThreadId === "number") editBody.message_thread_id = outboundMessageThreadId;
+      await tgJson("editMessageText", editBody);
+    } catch {
+      try {
+        /** @type {Record<string, unknown>} */
+        const rmBody = { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: [] } };
+        if (typeof outboundMessageThreadId === "number") rmBody.message_thread_id = outboundMessageThreadId;
+        await tgJson("editMessageReplyMarkup", rmBody);
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const stopPulse = startChatActionPulse(chatId, chatActionForLlmDraft());
+    try {
+      assertCredentialsFile();
+      const r = await runCommercialProposalDraftToDrive(rootId, tenderId, { ...treeOpts, offerOrg });
+      if (!r.ok) {
+        const w = r.warnings?.length ? `\n\n${r.warnings.slice(0, 5).join(" | ")}` : "";
+        await sendText(chatId, msgId, `КП: ошибка — ${r.error || "неизвестно"}${w}`);
+        return;
+      }
+      const w = r.warnings?.length ? `\n\nПредупреждения: ${r.warnings.slice(0, 6).join(" | ")}` : "";
+      const mdExtra =
+        r.markdownFileName && r.googleDocWebViewLink
+          ? `\n\nТакже Markdown: ${r.markdownFileName}`
+          : "";
+      const baseHead =
+        r.googleDocWebViewLink && r.googleDocFileName
+          ? `Коммерческое предложение в Google Doc: ${r.googleDocFileName} (папка drafts тендера).`
+          : `Черновик КП загружен: ${r.fileName} (папка drafts).`;
+      const linkOut = r.googleDocWebViewLink ?? r.webViewLink;
+      const linkLine = linkOut
+        ? `\n\n${r.googleDocWebViewLink ? "Ссылка на Google Doc:" : "Ссылка на файл в Drive:"} ${linkOut}`
+        : "";
+      await sendText(chatId, msgId, [baseHead, linkLine, mdExtra, w].filter(Boolean).join(""));
+    } catch (e) {
+      const err = e instanceof Error ? e.message : String(e);
+      await sendText(chatId, msgId, `КП: ошибка — ${err.slice(0, 3500)}`);
+    } finally {
+      stopPulse();
+    }
+    return;
+  }
+
+  if (data.startsWith(CB_PARSE_ORG_SELECT)) {
+    const rest = data.slice(CB_PARSE_ORG_SELECT.length);
+    const lastColon = rest.lastIndexOf(":");
+    if (lastColon <= 0) {
+      await answerCallbackQuery(id).catch(() => {});
+      return;
+    }
+    const token = rest.slice(0, lastColon).trim();
+    const orgIdx = Number.parseInt(rest.slice(lastColon + 1).trim(), 10);
+    pruneParseOrgPendingMap();
+    const pending = parseOrgPending.get(token);
+    if (!pending || pending.chatId !== chatId) {
+      await answerCallbackQuery(id, "Сообщение устарело.", true);
+      return;
+    }
+    if (Date.now() - pending.ts > PARSE_ORG_PENDING_TTL_MS) {
+      parseOrgPending.delete(token);
+      await answerCallbackQuery(id, "Сообщение устарело.", true);
+      return;
+    }
+    if (!kpGateIsReady(pending)) {
+      await answerCallbackQuery(
+        id,
+        "Сначала завершите мастер условий (4 ответа Лене) или /tenderprice …",
+        true,
+      );
+      return;
+    }
+    if (orgIdx !== 0 && orgIdx !== 1) {
+      await answerCallbackQuery(id).catch(() => {});
+      return;
+    }
+    pending.selected = orgIdx === 0 ? "gs_retail" : "finselvat";
+    pending.ts = Date.now();
+    const label = OFFER_ORG[pending.selected].label;
+    await answerCallbackQuery(id, `Выбрано: ${label}. Нажмите «Сформировать КП».`);
+    try {
+      /** @type {Record<string, unknown>} */
+      const rmBody = {
+        chat_id: chatId,
+        message_id: msgId,
+        reply_markup: buildParseOrgInlineKeyboard(token, pending.selected),
+      };
+      if (typeof outboundMessageThreadId === "number") rmBody.message_thread_id = outboundMessageThreadId;
+      await tgJson("editMessageReplyMarkup", rmBody);
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
+
+  if (data.startsWith(CB_PARSE_ORG_GO)) {
+    const token = data.slice(CB_PARSE_ORG_GO.length).trim();
+    pruneParseOrgPendingMap();
+    const pending = parseOrgPending.get(token);
+    if (!pending || pending.chatId !== chatId) {
+      await answerCallbackQuery(id, "Сообщение устарело. Запустите парсинг снова или /tenderkp.", true);
+      return;
+    }
+    if (Date.now() - pending.ts > PARSE_ORG_PENDING_TTL_MS) {
+      parseOrgPending.delete(token);
+      await answerCallbackQuery(id, "Сообщение устарело. Запустите парсинг снова или /tenderkp.", true);
+      return;
+    }
+    if (!kpGateIsReady(pending)) {
+      await answerCallbackQuery(
+        id,
+        "Сначала завершите мастер условий (4 ответа Лене) или /tenderprice …",
+        true,
+      );
+      return;
+    }
+    if (!pending.selected) {
+      await answerCallbackQuery(id, "Сначала выберите компанию", true);
+      return;
+    }
+    if (parseOrgGoConsumed.has(token)) {
+      await answerCallbackQuery(id, "Уже выполняется…", true);
+      return;
+    }
+    parseOrgGoConsumed.add(token);
+    parseOrgPending.delete(token);
+    unregisterManagerPriceAnchorsForToken(token);
+
+    const tenderId = pending.tenderId;
+    const treeOpts = pending.opts;
+    const offerOrg = pending.selected;
+    const orgLabel = OFFER_ORG[offerOrg].label;
+
+    await answerCallbackQuery(id, "Формирую черновик…");
+
+    try {
+      /** @type {Record<string, unknown>} */
+      const rmBody = {
+        chat_id: chatId,
+        message_id: msgId,
+        reply_markup: { inline_keyboard: [] },
+      };
+      if (typeof outboundMessageThreadId === "number") rmBody.message_thread_id = outboundMessageThreadId;
+      await tgJson("editMessageReplyMarkup", rmBody);
+    } catch {
+      /* ignore */
+    }
+
+    const headMid = await sendText(
+      chatId,
+      msgId,
+      `КП ${tenderId} · ${orgLabel}\n\nФормирую черновик…`,
+    );
+
+    const stopPulse = startChatActionPulse(chatId, chatActionForLlmDraft());
+    try {
+      assertCredentialsFile();
+      const r = await runCommercialProposalDraftToDrive(rootId, tenderId, { ...treeOpts, offerOrg });
+      if (!r.ok) {
+        const w = r.warnings?.length ? `\n\n${r.warnings.slice(0, 5).join(" | ")}` : "";
+        await sendText(chatId, headMid ?? msgId, `КП: ошибка — ${r.error || "неизвестно"}${w}`);
+        return;
+      }
+      const w = r.warnings?.length ? `\n\nПредупреждения: ${r.warnings.slice(0, 6).join(" | ")}` : "";
+      const mdExtra =
+        r.markdownFileName && r.googleDocWebViewLink
+          ? `\n\nТакже Markdown: ${r.markdownFileName}`
+          : "";
+      const baseHead =
+        r.googleDocWebViewLink && r.googleDocFileName
+          ? `Коммерческое предложение в Google Doc: ${r.googleDocFileName} (папка drafts тендера).`
+          : `Черновик КП загружен: ${r.fileName} (папка drafts).`;
+      const linkOut = r.googleDocWebViewLink ?? r.webViewLink;
+      const linkLine = linkOut
+        ? `\n\n${r.googleDocWebViewLink ? "Ссылка на Google Doc:" : "Ссылка на файл в Drive:"} ${linkOut}`
+        : "";
+      await sendText(chatId, headMid ?? msgId, [baseHead, linkLine, mdExtra, w].filter(Boolean).join(""));
+    } catch (e) {
+      const err = e instanceof Error ? e.message : String(e);
+      await sendText(chatId, headMid ?? msgId, `КП: ошибка — ${err.slice(0, 3500)}`);
+    } finally {
+      stopPulse();
+    }
+    return;
+  }
+
+  if (data.startsWith(CB_PARSE_PREFIX)) {
+    const tenderId = data.slice(CB_PARSE_PREFIX.length).trim();
+    if (!/^[0-9]+$/.test(tenderId) || tenderId.length < 4 || tenderId.length > 15) {
+      await answerCallbackQuery(id, "Некорректный номер закупки");
+      return;
+    }
+    const consumeKey = `${chatId}:${msgId}`;
+    if (consumedIceTradeParseButton.has(consumeKey)) {
+      await answerCallbackQuery(id, "Анализ документов по этому сообщению уже запускался.", true);
+      return;
+    }
+    consumedIceTradeParseButton.add(consumeKey);
+    if (consumedIceTradeParseButton.size > 5000) consumedIceTradeParseButton.clear();
+
+    await answerCallbackQuery(id, "Запускаю парсинг…");
+
+    const oldText = typeof msg.text === "string" ? msg.text : "";
+    const suffix = "\n\n🟩 Анализ документов — запущен.";
+    let newText = oldText + suffix;
+    if (newText.length > 4096) {
+      newText = `${oldText.slice(0, Math.max(0, 4096 - suffix.length - 8))}…${suffix}`;
+    }
+    try {
+      /** @type {Record<string, unknown>} */
+      const editBody = {
+        chat_id: chatId,
+        message_id: msgId,
+        text: newText,
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: [] },
+      };
+      if (typeof outboundMessageThreadId === "number") editBody.message_thread_id = outboundMessageThreadId;
+      await tgJson("editMessageText", editBody);
+    } catch {
+      try {
+        /** @type {Record<string, unknown>} */
+        const rmBody = { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: [] } };
+        if (typeof outboundMessageThreadId === "number") rmBody.message_thread_id = outboundMessageThreadId;
+        await tgJson("editMessageReplyMarkup", rmBody);
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const stopPulse = startChatActionPulse(chatId, chatActionForParsePipeline());
+    try {
+      assertCredentialsFile();
+      const md = await runTenderInputsExtractMarkdown({ rootId, tenderId, opts: {} });
+      const pToken = newParseOrgToken();
+      await sendAnalysisResultThenMaybePriceGate(chatId, replyTo, md, pToken, tenderId, {});
+    } catch (e) {
+      const err = e instanceof Error ? e.message : String(e);
+      await sendText(chatId, replyTo, `Парсинг: ошибка — ${err.slice(0, 3500)}`);
+    } finally {
+      stopPulse();
+    }
+    return;
+  }
+
+  await answerCallbackQuery(id).catch(() => {});
 }
 
 /**
@@ -815,37 +1974,98 @@ async function cmdTenderExtract(chatId, replyTo, args) {
     await sendText(
       chatId,
       replyTo,
-      "Использование: /tenderextract <tender_id> [ГГГГ|flat]\nПарсинг **inputs/**: если есть PDF/DOC/Google-файлы — текст в **inputs/extracted/**; если только «нативный» текст — **extracted** не создаётся. Статус → **tender-pipeline-state.json** в корне тендера. Без LLM.",
+      "Использование: /tenderextract <tender_id> [ГГГГ|flat]\nПарсинг **inputs/**: если есть PDF/DOC/Google-файлы — текст в **inputs/extracted/**; если только «нативный» текст — **extracted** не создаётся. Статус → **tender-pipeline-state.json** в корне тендера. При заданном ключе LLM — сразу **анализ комплекта** и **матрица требований** (строго из распарсенного текста); иначе только извлечение.",
     );
     return;
   }
   assertCredentialsFile();
-  await sendText(chatId, replyTo, `Парсинг **${parsed.tenderId}**: сканирую **inputs/** …`);
+  const statusMid = await sendText(chatId, replyTo, `Парсинг **${parsed.tenderId}**: сканирую **inputs/** …`);
+  const stopPulse = startChatActionPulse(chatId, chatActionForParsePipeline());
   try {
-    const ex = await extractTenderInputDocumentsToExtracted(rootId, parsed.tenderId, parsed.opts);
-    const okN = ex.items.filter((i) => i.chars > 0 && !i.error).length;
-    const failN = ex.items.filter((i) => i.error).length;
-    const modeLine =
-      ex.mode === "native_only"
-        ? "**Режим:** **native_only** — **inputs/extracted/** не создана (достаточно текста в **inputs**)."
-        : "**Режим:** **extracted_workspace** — см. **inputs/extracted/** и **extract-manifest.json**.";
-    await sendTextChunks(
+    const md = await runTenderInputsExtractMarkdown({
+      rootId,
+      tenderId: parsed.tenderId,
+      opts: parsed.opts,
+    });
+    const pToken = newParseOrgToken();
+    await sendAnalysisResultThenMaybePriceGate(chatId, statusMid ?? replyTo, md, pToken, parsed.tenderId, parsed.opts);
+  } catch (e) {
+    const err = e instanceof Error ? e.message : String(e);
+    await sendText(chatId, statusMid ?? replyTo, `Парсинг: ошибка — ${err.slice(0, 3500)}`);
+  } finally {
+    stopPulse();
+  }
+}
+
+async function cmdTenderKp(chatId, replyTo, args) {
+  const parsed = parseBundleOpts(args);
+  if (!parsed) {
+    await sendText(
       chatId,
       replyTo,
       [
-        `**Готово.** С текстом: **${okN}** / ${ex.items.length} файл(ов).`,
-        modeLine,
-        `Сводка и статусы: **\`tender-pipeline-state.json\`** в корне папки тендера на Drive.`,
-        failN ? `Ошибки по файлам: **${failN}** (поля **error** в состоянии парсинга / во **extract-manifest.json** при режиме extracted).` : "",
-        "",
-        "Дальше: **/tendercard** …",
-      ]
-        .filter(Boolean)
-        .join("\n"),
+        "Использование: /tenderkp <tender_id> [ГГГГ|flat]",
+        "Нужен **парсинг** **inputs/** (**/tenderextract**) — в корне тендера должен быть **tender-pipeline-state.json**.",
+        "После Analysis сначала пройдите **мастер условий** в Telegram (цена → оплата → срок → гарантия) или **/tenderprice**, затем выберите компанию (**ГС Ритейл** / **Финсельват**) и **Сформировать КП**. Черновик: **Google Doc** по шаблону (если настроен) + опционально Markdown в **drafts/**.",
+      ].join("\n"),
     );
-  } catch (e) {
-    const err = e instanceof Error ? e.message : String(e);
-    await sendText(chatId, replyTo, `Парсинг: ошибка — ${err.slice(0, 3500)}`);
+    return;
+  }
+  assertCredentialsFile();
+  if (!isLlmConfigured()) {
+    await sendText(chatId, replyTo, "Нужен OPENAI_API_KEY или LENA_OPENAI_API_KEY для КП.");
+    return;
+  }
+  pruneKpOrgPendingMap();
+  const token = newKpOrgToken();
+
+  const { tender } = await ensureTenderTree(rootId, parsed.tenderId, parsed.opts);
+  const prepCorpus = (await readPreparationPromptFromNotes(tender.notesId)) ?? "";
+  const hasStoredPrice =
+    !managerPriceGateDisabled() &&
+    ((await readManagerPriceQuoteFromNotes(tender.notesId)) ?? "").trim().length > 0;
+
+  const gateOn = !managerPriceGateDisabled() && !hasStoredPrice;
+  const wizForGate = gateOn ? newManagerPriceWizardState(prepCorpus) : null;
+
+  /** @type {KpOrgPending} */
+  const pendEntry = {
+    tenderId: parsed.tenderId,
+    opts: parsed.opts,
+    chatId,
+    ts: Date.now(),
+    selected: null,
+    kpGatePhase: gateOn ? "awaiting_manager_price" : "ready",
+    managerPriceWizard: wizForGate,
+  };
+  kpOrgPending.set(token, pendEntry);
+
+  const intro = [
+    `КП ${parsed.tenderId}: от какой компании подаётся предложение?`,
+    "",
+    "Шаблоны и вложения зависят от выбора. Материалы держите в подпапках gs-retail и finselvat в _lena/templates, _lena/org-docs, _lena/founding-docs (появятся после drive workspace-ensure).",
+    "Одна организация за раз; переключение — другой кнопкой.",
+    "",
+    "После выбора нажмите «Сформировать КП».",
+  ].join("\n");
+
+  if (kpGateIsReady(pendEntry)) {
+    await sendText(chatId, replyTo, intro, { reply_markup: buildKpOrgInlineKeyboard(token, null) });
+    return;
+  }
+
+  const introShort = [
+    `КП ${parsed.tenderId}: четыре коротких ответа про условия или одной командой /tenderprice ${parsed.tenderId} …`,
+    "",
+    "Цена — в валюте закупки (BYN, USD, EUR и т.д.), НДС — как в документации. Потом выберите компанию кнопками.",
+  ].join("\n");
+  await sendText(chatId, replyTo, introShort);
+  const gateText = buildManagerPriceWizardFirstMessageText(parsed.tenderId, prepCorpus, wizForGate);
+  const gateKb = buildManagerPriceWizardStarterKeyboard(token, "price", wizForGate);
+  const gateMid = await sendText(chatId, replyTo, gateText, gateKb ? { reply_markup: gateKb } : undefined);
+  const pend = kpOrgPending.get(token);
+  if (pend && typeof gateMid === "number") {
+    registerManagerPriceAnchor(chatId, gateMid, { flow: "kp", token });
   }
 }
 
@@ -864,7 +2084,7 @@ async function cmdTenderCard(chatId, replyTo, args) {
     await sendText(chatId, replyTo, "Нужен OPENAI_API_KEY или LENA_OPENAI_API_KEY для карточки.");
     return;
   }
-  await sendText(
+  const statusMid = await sendText(
     chatId,
     replyTo,
     `Карточка **${parsed.tenderId}**: текст из **inputs/** или **inputs/extracted** + HTML IceTrade → LLM…`,
@@ -881,10 +2101,10 @@ async function cmdTenderCard(chatId, replyTo, args) {
     if (cr.ok && cr.noteUploadError) {
       msg += `\n\n_(Запись заметки: ${String(cr.noteUploadError).slice(0, 500)})_`;
     }
-    await sendTextChunks(chatId, replyTo, msg);
+    await sendTextChunks(chatId, statusMid ?? replyTo, msg);
   } catch (e) {
     const err = e instanceof Error ? e.message : String(e);
-    await sendText(chatId, replyTo, `Карточка: ошибка — ${err.slice(0, 3500)}`);
+    await sendText(chatId, statusMid ?? replyTo, `Карточка: ошибка — ${err.slice(0, 3500)}`);
   }
 }
 
@@ -901,14 +2121,14 @@ async function cmdHelp(chatId, replyTo) {
       ? `RAG: папка задана, но нет manifest.json/chunks.jsonl — ${ragDir}`
       : "RAG: не задан LENA_RAG_INDEX_DIR — /archivesearch и /archiveask недоступны.";
   const llm = isLlmConfigured()
-    ? "LLM: задан ключ (OPENAI_API_KEY или LENA_OPENAI_API_KEY)."
-    : "LLM: ключ не задан — /ask, /tenderask, /tendercard и /archiveask недоступны.";
+    ? "LLM: задан ключ — /tendercard, /tenderkp и **анализ с матрицей** после **/tenderextract** / «Анализ документов»."
+    : "LLM: ключ не задан — /ask, /tenderask, /tendercard, /tenderkp и /archiveask недоступны; **/tenderextract** / «Анализ документов» только извлекают текст.";
   await sendText(
     chatId,
     replyTo,
     [
       "Лена — команды:",
-      "В группе можно написать @бот и ссылку IceTrade (…/tenders/all/view/<номер>) — подтвердит id и подскажет команды.",
+      "В группе бот видит все сообщения, кроме начинающихся с @ другого участника. Ссылка IceTrade (…/view/<номер>) — импорт в **inputs** на Drive. Парсинг — **«Анализ документов»** или **/tenderextract**. Расширенный режим: **LENA_TELEGRAM_ICETRADE_IMPORT_ONLY=0**.",
       "/templates — список файлов в _lena/templates (проверка бланка и др.)",
       "/library — _lena/library",
       "/orgdocs — _lena/org-docs (универсальные документы на все тендеры)",
@@ -916,12 +2136,14 @@ async function cmdHelp(chatId, replyTo) {
       "/context — _lena/context + опционально LENA_EXTRA_CONTEXT_FOLDERS",
       "/bundle <tender_id> [ГГГГ|flat] — JSON agent-bundle файлом",
       "/ingest <tender_id> [ГГГГ|flat] <ссылка_на_папку_Drive> — копировать файлы из папки в inputs тендера",
-      "/ask … — вопрос нейросети (краткая память в чате); следующие реплики можно писать обычным текстом (без повторного /ask), пока не сбросите диалог через /newchat. **В личке** тот же режим: можно сразу писать задачу текстом — при настроенном LLM она уходит в модель (или используйте явный /ask …). **В группе:** явно обращайтесь к Лене через @username в тексте; без номера закупки/ссылки IceTrade продолжайте цепочкой «Ответить» на сообщение Лены по нужному тендеру или укажите номер (например 1336119) — иначе бот попросит уточнить закупку. См. docs/LENA_RULES.md §6a.",
+      "/ask … — вопрос нейросети (краткая память в чате); следующие реплики можно писать обычным текстом (без повторного /ask), пока не сбросите диалог через /newchat. **В группе** бот видит все сообщения, кроме начинающихся с @ **другого** участника; без контекста закупки попросит повторить через «Ответить» на сообщение по нужной закупке — см. docs/LENA_RULES.md §6a.",
       "/archivesearch (или /searcharchive) … [число] — поиск по локальному RAG-архиву (фрагменты + пути; см. LENA_RAG_INDEX_DIR и эмбеддинги).",
       "/archiveask (или /askarchive) … [число] — тот же поиск + ответ LLM по найденным отрывкам (нужен ключ LLM и сервер эмбеддингов).",
       "/tenderask <tender_id> [ГГГГ|flat] …вопрос — бандл с явным tender_id + вопрос модели",
-      "/tenderextract <tender_id> [ГГГГ|flat] — парсинг **inputs/** (при необходимости **inputs/extracted**; статус **tender-pipeline-state.json**)",
+      "/tenderextract <tender_id> [ГГГГ|flat] — парсинг **inputs/**; при ключе LLM — **анализ** и **матрица**; затем в Telegram — **мастер условий** (4 шага) или **/tenderprice**, потом выбор компании",
+      "/tenderprice <tender_id> [ГГГГ|flat] <текст> — сохранить условия в **notes/** одним сообщением (обход мастера; сумма **с НДС 20 %**)",
       "/tendercard <tender_id> [ГГГГ|flat] — карточка: текст из **inputs/** или **inputs/extracted** + HTML IceTrade + LLM",
+      "/tenderkp <tender_id> [ГГГГ|flat] — КП (LLM): при необходимости мастер **цена → оплата → срок → гарантия** или **/tenderprice**; затем **ГС Ритейл** / **Финсельват** → **Сформировать КП** → **Google Doc** + Markdown в **drafts/** (**сначала** /tenderextract)",
       "/newchat — сбросить память для /ask в этом чате",
       "/product — цель продукта (IceTrade, Drive, политика RAG-корпуса)",
       "/help — это сообщение",
@@ -1341,6 +2563,17 @@ async function main() {
     for (const u of list) {
       outboundMessageThreadId = undefined;
       offset = u.update_id + 1;
+
+      const rawCq = /** @type {{ callback_query?: Record<string, unknown> }} */ (u).callback_query;
+      if (rawCq && typeof rawCq === "object" && rawCq.id != null) {
+        try {
+          await handleCallbackQuery(rawCq);
+        } catch (e) {
+          console.error("[lena-bot] callback_query:", e instanceof Error ? e.message : String(e));
+        }
+        continue;
+      }
+
       const msg = /** @type {Record<string, unknown> & { chat?: { id: number; type?: string }; text?: string; caption?: string; message_id?: number; entities?: unknown[]; caption_entities?: unknown[]; reply_to_message?: { message_id?: number }; message_thread_id?: number }} */ (
         u.message ??
         /** @type {{ edited_message?: typeof u.message }} */ (u).edited_message ??
@@ -1362,7 +2595,14 @@ async function main() {
         entities: msg.entities ?? msg.caption_entities,
       };
       const chatId = msg.chat.id;
-      if (allowedChats && !allowedChats.has(String(chatId))) continue;
+      if (allowedChats && !allowedChats.has(String(chatId))) {
+        if (tgDebug) {
+          console.error(
+            `[lena-bot tg] skip: chat_id ${chatId} нет в TELEGRAM_ALLOWED_CHAT_IDS (${[...allowedChats].join(", ")})`,
+          );
+        }
+        continue;
+      }
       const t = msg.chat.type;
       if (t !== "private" && t !== "group" && t !== "supergroup") continue;
 
@@ -1376,21 +2616,44 @@ async function main() {
         );
       }
 
+      const isGroup = t === "group" || t === "supergroup";
+      if (isGroup && groupMessageStartsWithOtherUserMention(bodyText, t, msgForEntity)) {
+        if (tgDebug) {
+          console.error("[lena-bot tg] skip: в начале сообщения тег другого участника (не бот)");
+        }
+        continue;
+      }
+
       const replyTo = msg.message_id;
       if (typeof replyTo !== "number") continue;
-      const isGroup = t === "group" || t === "supergroup";
+      try {
+        if (await tryConsumeManagerPriceGateReply(msg, bodyText, chatId, replyTo)) continue;
+      } catch (e) {
+        const err = e instanceof Error ? e.message : String(e);
+        await sendText(chatId, replyTo, `Ошибка: ${err.slice(0, 3500)}`);
+        continue;
+      }
       const parsed = parseCommand(bodyText);
       if (!parsed) {
+        const iceIds = extractIceTradeViewIds(bodyText);
+        if (iceIds.length > 0 && (t === "private" || isGroup)) {
+          try {
+            const handledIce = await handleIceTradeBootstrap(chatId, replyTo, bodyText);
+            if (handledIce) continue;
+          } catch (e) {
+            const err = e instanceof Error ? e.message : String(e);
+            await sendText(chatId, replyTo, `Ошибка: ${err.slice(0, 3500)}`);
+            continue;
+          }
+        }
         const hk = historyKey(chatId);
         const hasAskHistory = (chatHistory.get(hk) ?? []).length > 0;
-        const continueAskDialog =
-          hasAskHistory &&
-          (t === "private" ||
-            messageAddressesBot(bodyText, t, msgForEntity) ||
-            (isGroup && replyChainToBot(msgForEntity)));
+        if (await handleConversationTurn(chatId, replyTo, bodyText)) continue;
+
+        const continueAskDialog = hasAskHistory && (t === "private" || isGroup);
         if (continueAskDialog) {
           if (isGroup && !groupAskHasProcurementContext(bodyText, msgForEntity)) {
-            await sendText(chatId, replyTo, tenderAnchorHintReply());
+            await sendText(chatId, replyTo, telegramTenderContextMissingHint());
             continue;
           }
           try {
@@ -1411,7 +2674,12 @@ async function main() {
           await sendText(chatId, replyTo, `Ошибка: ${err.slice(0, 3500)}`);
           continue;
         }
-        if (t === "private" && isLlmConfigured()) {
+        if (isLlmConfigured() && (t === "private" || isGroup)) {
+          if (await handleConversationTurn(chatId, replyTo, bodyText)) continue;
+          if (isGroup && !groupAskHasProcurementContext(bodyText, msgForEntity)) {
+            await sendText(chatId, replyTo, telegramTenderContextMissingHint());
+            continue;
+          }
           try {
             await cmdAsk(chatId, replyTo, bodyText, {
               telegramReplyToMessageId: msg.reply_to_message?.message_id,
@@ -1422,19 +2690,23 @@ async function main() {
           }
           continue;
         }
+        if (isGroup) {
+          await sendText(
+            chatId,
+            replyTo,
+            "Сообщение получено. Для вопросов к модели задайте OPENAI_API_KEY (или LENA_OPENAI_API_KEY). Иначе: ссылка IceTrade, /help, /tenderask <tender_id> …",
+          );
+          continue;
+        }
+        continue;
+      }
+
+      if (parsed.rest?.trim() && (await handleConversationTurn(chatId, replyTo, parsed.rest))) {
         continue;
       }
 
       if (parsed.name === "ask" && groupAskRequireReply && isGroup && !msg.reply_to_message) {
-        await sendText(
-          chatId,
-          replyTo,
-          [
-            "В этой группе для /ask включено правило: нужно ответить через «Ответить» на сообщение по нужному тендеру (например на прошлый ответ бота или на /bundle по этой закупке).",
-            "Иначе непонятно, о каком тендере речь. Либо используйте /tenderask <tender_id> … — там tender_id задаётся явно.",
-            "Подробнее: docs/LENA_RULES.md (раздел про Telegram).",
-          ].join("\n"),
-        );
+        await sendText(chatId, replyTo, telegramTenderContextMissingHint());
         continue;
       }
 
@@ -1444,7 +2716,7 @@ async function main() {
         parsed.rest.trim() &&
         !groupAskHasProcurementContext(parsed.rest, msgForEntity)
       ) {
-        await sendText(chatId, replyTo, tenderAnchorHintReply());
+        await sendText(chatId, replyTo, telegramTenderContextMissingHint());
         continue;
       }
 
@@ -1488,6 +2760,12 @@ async function main() {
             break;
           case "tenderextract":
             await cmdTenderExtract(chatId, replyTo, parsed.args);
+            break;
+          case "tenderkp":
+            await cmdTenderKp(chatId, replyTo, parsed.args);
+            break;
+          case "tenderprice":
+            await cmdTenderPrice(chatId, replyTo, parsed.rest);
             break;
           case "ingest":
             await cmdIngest(chatId, replyTo, parsed.rest);

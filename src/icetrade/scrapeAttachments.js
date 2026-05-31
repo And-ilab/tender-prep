@@ -168,7 +168,8 @@ function decodeHtmlEntities(s) {
 function linkLooksLikeAttachment(hrefLower, path, search, onIcetrade, relaxed, linkTextNorm, onGoszakupki) {
   const okExt = /\.(pdf|docx?|zip|rar|7z|xlsx?|csv|txt|pptx?)(\?|#|$)/i.test(hrefLower);
   const okKw = /(download|attach|file|upload|storage|docs)/i.test(path);
-  /** Прямая выдача файла с goszakupki.by (в URL часто нет .pdf — имя в тексте ссылки). */
+  /** IceTrade `/auction/getFile/…?f=detail&n=0` — расширения в URL нет. */
+  const okIceTradeGetFile = relaxed && onIcetrade && /\/auction\/getfile\//i.test(path);
   const okGoszakupkiGetFile = onGoszakupki && /\/(auction\/)?get-file\/\d+/i.test(path);
   const okLinkTextGoszakupki =
     relaxed &&
@@ -196,6 +197,7 @@ function linkLooksLikeAttachment(hrefLower, path, search, onIcetrade, relaxed, l
   return Boolean(
     okExt ||
       okKw ||
+      okIceTradeGetFile ||
       okGoszakupkiGetFile ||
       okLinkTextGoszakupki ||
       okIceTradeId ||
@@ -301,6 +303,20 @@ function collectIcetradeAbsoluteFileUrls(html, base, seen, out, relaxed) {
   }
 }
 
+/** Ссылки вида https://icetrade.by/auction/getFile/…?f=detail&n=0 (расширения в URL нет). */
+function collectIceTradeGetFileUrls(html, base, seen, out, relaxed) {
+  const abs =
+    /https?:\/\/(?:www\.)?icetrade\.by\/auction\/getFile\/[^\s"'<>]+/gi;
+  let m;
+  while ((m = abs.exec(html)) !== null) {
+    tryPushDescriptor(m[0], undefined, base, seen, out, relaxed);
+  }
+  const rel = /["'](\/auction\/getFile\/[^"']+)["']/gi;
+  while ((m = rel.exec(html)) !== null) {
+    tryPushDescriptor(m[1], undefined, base, seen, out, relaxed);
+  }
+}
+
 /** Ссылки вида https://goszakupki.by/auction/get-file/&lt;id&gt;?… (расширения в URL нет). */
 function collectGoszakupkiGetFileUrls(html, base, seen, out, relaxed) {
   const re =
@@ -329,6 +345,7 @@ export function extractAttachmentCandidates(html, pageUrl) {
     collectFromAnchorTags(section, base, seen, out, true);
     collectBareHrefs(section, base, seen, out, true);
     collectIcetradeAbsoluteFileUrls(section, base, seen, out, true);
+    collectIceTradeGetFileUrls(section, base, seen, out, true);
     collectGoszakupkiGetFileUrls(section, base, seen, out, true);
   }
 
@@ -339,6 +356,7 @@ export function extractAttachmentCandidates(html, pageUrl) {
     collectFromAnchorTags(html, base, seen, out, false);
     collectBareHrefs(html, base, seen, out, false);
     collectIcetradeAbsoluteFileUrls(html, base, seen, out, false);
+    collectIceTradeGetFileUrls(html, base, seen, out, false);
     collectGoszakupkiGetFileUrls(html, base, seen, out, false);
   }
 

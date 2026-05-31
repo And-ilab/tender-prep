@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { assertCredentialsFile } from "../drive/config.js";
 import { ensureChildFolder, findChildFolderId } from "../drive/folders.js";
+import { TENDER_SUB } from "../drive/layoutConstants.js";
 import {
   downloadFile,
   exportGoogleFile,
@@ -17,8 +18,8 @@ import { ensureTenderTree } from "../drive/workspace.js";
 /**
  * Парсинг `inputs/`: правило продукта
  * - если **все** файлы читаются как текст без PDF/DOC/Office/Google-экспорта → папка **`inputs/extracted/` не создаётся** (достаточно `inputs/`);
- * - иначе → **`inputs/extracted/`** + `.txt` и `extract-manifest.json`, библиотеки по цепочке (PDF → при пустом/коротком тексте **OCR** через Tesseract, DOC/DOCX, экспорт Google).
- * Аналитика: **`tender-pipeline-state.json`** в **корне папки тендера** (рядом с `inputs`, `notes`, …).
+ * - иначе → **`inputs/extracted/`** + `.txt`, **`extract-manifest.json`** (в т.ч. **`items[].ai`** для ИИ), **`AI-TEXT-SOURCES.md`**, библиотеки по цепочке (PDF → при пустом/коротком тексте **OCR** через Tesseract, DOC/DOCX, экспорт Google).
+ * Аналитика: **`tender-pipeline-state.json`** в **корне папки тендера** — поля **`parsing.aiGuide`** и **`parsing.items[].ai`** (те же правила для ИИ, что и в манифесте).
  */
 
 /** @param {unknown} e */
@@ -32,10 +33,175 @@ function npmInstallHint(e) {
 /** Подпапка в `inputs` с извлечённым текстом. */
 export const INPUTS_EXTRACTED_SUBDIR = "extracted";
 
+/**
+ * Защита от неверного **LENA_DRIVE_ROOT** / рассинхрона id: не создаём `extracted` в корне «Мой диск».
+ * @param {{ userRootId: string, tenderFolderId: string, inputsId: string }} p
+ */
+async function assertInputsFolderUnderTender(p) {
+  const { userRootId, tenderFolderId, inputsId } = p;
+  if (!inputsId || inputsId === userRootId) {
+    throw new Error(
+      "Папка **inputs** совпадает с корнем Drive — недопустимо. Укажите в **LENA_DRIVE_ROOT** тот же корень, что для `drive workspace-ensure` (родитель для `_lena/`), обычно «Мой диск» или общая папка, а не id отдельного файла.",
+    );
+  }
+  const meta = await getMetadata(inputsId);
+  const name = typeof meta.name === "string" ? meta.name : "";
+  const parents = Array.isArray(meta.parents) ? meta.parents.map(String) : [];
+  if (name !== TENDER_SUB.inputs || !parents.includes(tenderFolderId)) {
+    throw new Error(
+      [
+        "Папка документов закупки (**inputs**) не лежит внутри папки тендера на Drive — извлечение остановлено, чтобы не создавать **extracted** в корне диска.",
+        `Ожидалось: имя «${TENDER_SUB.inputs}», родитель — папка тендера \`${tenderFolderId}\`.`,
+        `Сейчас у id каталога: имя «${name || "?"}», родители: ${parents.length ? parents.join(", ") : "—"}.`,
+        "Проверьте **LENA_DRIVE_ROOT** и путь `_lena/tenders/<год>/<id>/inputs`.",
+      ].join(" "),
+    );
+  }
+}
+
 const MANIFEST_NAME = "extract-manifest.json";
 
 /** JSON статусов/аналитики по тендеру (корень папки закупки на Drive). */
 export const TENDER_PIPELINE_STATE_NAME = "tender-pipeline-state.json";
+
+/** Краткая таблица источников текста для людей/ИИ (только режим extracted_workspace). */
+const AI_TEXT_SOURCES_MD = "AI-TEXT-SOURCES.md";
+
+/**
+ * Версия схемы блока `ai` в манифесте и в `tender-pipeline-state.json`.
+ */
+export const EXTRACT_AI_SCHEMA_VERSION = 1;
+
+/**
+ * Машинная разметка для ИИ: откуда читать текст, качество, OCR, подсказка.
+ * @param {{
+ *   mode: "native_only" | "extracted_workspace",
+ *   sourceName: string,
+ *   destTxtName: string,
+ *   chars: number,
+ *   error: string | null,
+ *   usedExtractor?: string | null,
+ *   truncated: boolean,
+ * }} p
+ */
+export function buildAiMarkupForExtractItem(p) {
+  const usedEx = (p.usedExtractor ?? "").trim();
+  const ocr = /tesseract|ocr/i.test(usedEx);
+  const errStr = p.error != null && String(p.error).trim() ? String(p.error).trim() : "";
+  const hasErr = errStr.length > 0;
+  const noText = p.chars === 0;
+
+  /** @type {"failed" | "degraded" | "ocr" | "medium" | "high"} */
+  let extractionQuality = "high";
+  if (noText) extractionQuality = "failed";
+  else if (hasErr) extractionQuality = "degraded";
+  else if (ocr) extractionQuality = "ocr";
+  else if (/^pdf-parse$/i.test(usedEx) && p.chars < 200) extractionQuality = "medium";
+
+  /** @type {"none" | "native_inputs_utf8" | "extracted_txt"} */
+  let textProvenance = "none";
+  if (!noText) {
+    textProvenance = p.mode === "extracted_workspace" ? "extracted_txt" : "native_inputs_utf8";
+  }
+
+  let canonicalTextPath = null;
+  if (!noText) {
+    if (p.mode === "extracted_workspace" && p.destTxtName) {
+      canonicalTextPath = `inputs/extracted/${p.destTxtName}`;
+    } else if (p.mode === "native_only") {
+      canonicalTextPath = `inputs/${p.sourceName}`;
+    }
+  }
+
+  const sourceBinaryPath = `inputs/${p.sourceName}`;
+  const readOnlyThisForAnalysis = Boolean(canonicalTextPath);
+
+  let hintForLlm = "";
+  if (noText && hasErr) {
+    hintForLlm =
+      "Текст не извлечён — не трать токены на повторный разбор бинарника с нуля; опирайся на другие документы или запроси файл у пользователя.";
+  } else if (noText) {
+    hintForLlm = "Пустой текст — содержимое для анализа отсутствует.";
+  } else if (ocr) {
+    hintForLlm =
+      "Текст получен через OCR — возможны искажения; важные цифры, суммы и даты сверяй с другими документами или оригиналом.";
+  } else if (hasErr) {
+    hintForLlm = "Текст извлечён с предупреждением конвертера — при критичных цитатах сверяй оригинал на Drive.";
+  } else if (p.truncated) {
+    hintForLlm = "Текст усечён по лимиту символов; полный объём в файле на Google Drive.";
+  } else if (usedEx === "utf8") {
+    hintForLlm = "Нативный текст в inputs — обычно достоверен для цитирования.";
+  } else if (usedEx.startsWith("google_")) {
+    hintForLlm = "Текст из экспорта Google Docs/Sheets/Slides — обычно структурно пригоден для анализа.";
+  } else if (usedEx === "mammoth" || usedEx === "word-extractor") {
+    hintForLlm = "Текст из DOC/DOCX — обычно пригоден; вёрстка таблиц может отличаться от PDF.";
+  } else if (usedEx === "pdf-parse" || usedEx.includes("pdf-parse")) {
+    hintForLlm = "Текст из текстового слоя PDF — обычно пригоден для цитирования.";
+  } else {
+    hintForLlm =
+      "Используй canonicalTextPath как единственный источник текста для этого файла; не дублируй извлечение из бинарного оригинала.";
+  }
+
+  return {
+    schemaVersion: EXTRACT_AI_SCHEMA_VERSION,
+    canonicalTextPath,
+    sourceBinaryPath,
+    textProvenance,
+    readOnlyThisForAnalysis,
+    usedOcr: ocr,
+    extractionQuality,
+    truncated: p.truncated,
+    parsingWarning: hasErr && !noText,
+    hintForLlm,
+  };
+}
+
+/**
+ * Общие правила для промпта (дублируются в manifest и pipeline state).
+ */
+function buildExtractAiGuide(mode) {
+  return {
+    schemaVersion: EXTRACT_AI_SCHEMA_VERSION,
+    mode,
+    summaryForLlm:
+      "Для каждого входного файла смотри items[].ai: поле canonicalTextPath задаёт, где лежит уже извлечённый текст. Не пытайся заново «читать» PDF/DOCX из inputs/, если для этой записи есть непустой canonicalTextPath в extracted.",
+    rules: [
+      "Читай текст только по canonicalTextPath (или из native inputs для режима без extracted).",
+      "Если extractionQuality = failed — не выдумывай содержимое файла.",
+      "Если extractionQuality = ocr или degraded — осторожнее с точными числами и таблицами.",
+      "Если usedOcr = true — считай текст оптически распознанным.",
+      "Используй hintForLlm по каждому файлу как краткую политику доверия.",
+    ],
+  };
+}
+
+/**
+ * Краткий Markdown-обзор для папки extracted (удобно открыть в Drive).
+ * @param {"native_only" | "extracted_workspace"} mode
+ * @param {Array<{ sourceName: string, ai?: unknown }>} items
+ */
+function buildAiTextSourcesMarkdown(mode, items) {
+  const lines = [
+    "# Источники текста для анализа (авто, Лена / tender-prep)",
+    "",
+    `Режим: **${mode}**. Подробности в **extract-manifest.json** (\`items[].ai\`, \`aiGuide\`).`,
+    "",
+    "| Исходный файл (inputs) | Текст для ИИ | Качество | OCR |",
+    "| --- | --- | --- | --- |",
+  ];
+  for (const i of items) {
+    const ai = /** @type {{ canonicalTextPath?: string | null; extractionQuality?: string; usedOcr?: boolean } | undefined} */ (
+      i.ai
+    );
+    const path = ai?.canonicalTextPath ?? "—";
+    const q = ai?.extractionQuality ?? "—";
+    const ocr = ai?.usedOcr ? "да" : "нет";
+    const name = String(i.sourceName ?? "").replace(/\|/g, "\\|");
+    lines.push(`| ${name} | ${String(path).replace(/\|/g, "\\|")} | ${q} | ${ocr} |`);
+  }
+  lines.push("");
+  return lines.join("\n");
+}
 
 /**
  * @param {string} name
@@ -136,15 +302,18 @@ export async function extractBufferToText(buffer, name, mimeType) {
         rawPdfText = "";
       }
       const trimmedPdf = rawPdfText.trim();
-      const { pdfPlainTextIsTooShortForOcrTrigger, ocrPdfBufferLastResort } = await import("./pdfOcrFallback.js");
-      if (!pdfPlainTextIsTooShortForOcrTrigger(trimmedPdf) && trimmedPdf.length > 0) {
+      const { pdfShouldRunVisualExtractPipeline, ocrPdfBufferLastResort } = await import("./pdfOcrFallback.js");
+      if (!pdfShouldRunVisualExtractPipeline(trimmedPdf) && trimmedPdf.length > 0) {
         return { text: trimmedPdf, usedExtractor: "pdf-parse" };
       }
       const ocr = await ocrPdfBufferLastResort(buffer);
       if (ocr.text.trim()) {
+        const via = (ocr.via && String(ocr.via).trim()) || "tesseract-pdf-ocr";
+        const usedExtractor = trimmedPdf.length > 0 ? `pdf-parse+${via}` : via;
         return {
           text: ocr.text.trim(),
-          usedExtractor: trimmedPdf.length > 0 ? "pdf-parse+tesseract-pdf-ocr" : "tesseract-pdf-ocr",
+          usedExtractor,
+          error: ocr.error ? `OCR: ${ocr.error}` : undefined,
         };
       }
       if (trimmedPdf.length > 0) {
@@ -258,6 +427,30 @@ async function loadPreviousTenderPipelineState(tenderFolderId, tmpRoot) {
 }
 
 /**
+ * Прочитать `tender-pipeline-state.json` из корня папки тендера на Drive (после парсинга inputs).
+ * @param {string} tenderFolderId
+ * @returns {Promise<Record<string, unknown> | null>}
+ */
+export async function readTenderPipelineState(tenderFolderId) {
+  assertCredentialsFile();
+  const kids = await listChildren(tenderFolderId);
+  const st = kids.find((f) => String(f.name) === TENDER_PIPELINE_STATE_NAME);
+  if (!st?.id) return null;
+  const tmpRoot = await mkdtemp(join(tmpdir(), "lena-pipeline-read-"));
+  try {
+    const path = join(tmpRoot, TENDER_PIPELINE_STATE_NAME);
+    await downloadFile(String(st.id), path);
+    const raw = await readFile(path, "utf8");
+    const o = JSON.parse(raw);
+    return o && typeof o === "object" && !Array.isArray(o) ? /** @type {Record<string, unknown>} */ (o) : null;
+  } catch {
+    return null;
+  } finally {
+    await rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
  * @param {Record<string, unknown>} prev
  * @param {Record<string, unknown>} patch
  */
@@ -288,7 +481,18 @@ async function persistTenderPipelineState(tenderFolderId, stateObj, tmpRoot) {
 }
 
 /**
- * @typedef {{ sourceFileId: string, sourceName: string, mimeType: string, classification: string, chars: number, destName?: string, error?: string | null, usedExtractor?: string | null }} ExtractManifestItem
+ * Элемент extract-manifest / pipeline: источник → извлечённый текст + блок ai для ИИ.
+ * @typedef {{
+ *   sourceFileId: string,
+ *   sourceName: string,
+ *   mimeType: string,
+ *   classification: string,
+ *   chars: number,
+ *   destName?: string,
+ *   error?: string | null,
+ *   usedExtractor?: string | null,
+ *   ai: Record<string, unknown>,
+ * }} ExtractManifestItem
  */
 
 /**
@@ -314,6 +518,7 @@ export async function extractTenderInputDocumentsToExtracted(userRootId, tenderI
   const { tender } = await ensureTenderTree(userRootId, tenderId, opts);
   const inputsId = tender.inputsId;
   const tenderFolderId = tender.folderId;
+  await assertInputsFolderUnderTender({ userRootId, tenderFolderId, inputsId });
 
   const topLevel = await listChildren(inputsId);
   /** @type {{ id: string; name: string; mime: string; kind: InputParseKind }[]} */
@@ -353,15 +558,28 @@ export async function extractTenderInputDocumentsToExtracted(userRootId, tenderI
      */
     function pushItem(id, name, mimeType, classification, slice, destTxtName, error, usedEx) {
       if (usedEx) usedExtractors.add(usedEx);
+      const truncated = slice.includes("…[усечено");
+      const errNorm = error == null || error === "" ? null : error;
+      const destNorm = destTxtName || "";
+      const ai = buildAiMarkupForExtractItem({
+        mode: needsExtracted ? "extracted_workspace" : "native_only",
+        sourceName: name,
+        destTxtName: destNorm,
+        chars: slice.length,
+        error: errNorm,
+        usedExtractor: usedEx ?? null,
+        truncated,
+      });
       items.push({
         sourceFileId: id,
         sourceName: name,
         mimeType,
         classification,
         chars: slice.length,
-        destName: destTxtName,
-        error,
+        destName: destNorm || undefined,
+        error: errNorm,
         usedExtractor: usedEx ?? null,
+        ai,
       });
     }
 
@@ -417,6 +635,7 @@ export async function extractTenderInputDocumentsToExtracted(userRootId, tenderI
         mode: "native_only",
         inputsFolderId: inputsId,
         extractedFolderId: null,
+        aiGuide: buildExtractAiGuide("native_only"),
         items,
       };
 
@@ -429,6 +648,7 @@ export async function extractTenderInputDocumentsToExtracted(userRootId, tenderI
           lastRunAt: new Date().toISOString(),
           lastAction: "parse_inputs",
           mode: "native_only",
+          aiGuide: buildExtractAiGuide("native_only"),
           reason:
             work.length === 0
               ? "inputs пуст — extracted не создаётся"
@@ -446,6 +666,7 @@ export async function extractTenderInputDocumentsToExtracted(userRootId, tenderI
             chars: i.chars,
             error: i.error ?? undefined,
             usedExtractor: i.usedExtractor ?? undefined,
+            ai: i.ai,
           })),
         },
       });
@@ -547,6 +768,7 @@ export async function extractTenderInputDocumentsToExtracted(userRootId, tenderI
       mode: "extracted_workspace",
       inputsFolderId: inputsId,
       extractedFolderId: extractedId,
+      aiGuide: buildExtractAiGuide("extracted_workspace"),
       items,
     };
 
@@ -564,6 +786,20 @@ export async function extractTenderInputDocumentsToExtracted(userRootId, tenderI
     await uploadFile(extractedId, manPath, MANIFEST_NAME);
     await rm(manDir, { recursive: true, force: true }).catch(() => {});
 
+    const mdDir = await mkdtemp(join(tmpdir(), "lena-aimd-"));
+    const mdPath = join(mdDir, AI_TEXT_SOURCES_MD);
+    await writeFile(mdPath, buildAiTextSourcesMarkdown("extracted_workspace", items), "utf8");
+    try {
+      const oldAiMd = (await listChildren(extractedId)).find((f) => f.name === AI_TEXT_SOURCES_MD)?.id;
+      if (oldAiMd) {
+        await trashDriveFile(String(oldAiMd));
+      }
+    } catch {
+      /* ignore */
+    }
+    await uploadFile(extractedId, mdPath, AI_TEXT_SOURCES_MD);
+    await rm(mdDir, { recursive: true, force: true }).catch(() => {});
+
     const okN = items.filter((i) => !i.error).length;
     const errN = items.filter((i) => i.error).length;
 
@@ -576,6 +812,7 @@ export async function extractTenderInputDocumentsToExtracted(userRootId, tenderI
         lastRunAt: new Date().toISOString(),
         lastAction: "parse_inputs",
         mode: "extracted_workspace",
+        aiGuide: buildExtractAiGuide("extracted_workspace"),
         reason:
           "есть файлы, требующие PDF/DOC/DOCX/Google-экспорта или неизвестного извлечения — создана inputs/extracted",
         inputsFolderId: inputsId,
@@ -592,6 +829,7 @@ export async function extractTenderInputDocumentsToExtracted(userRootId, tenderI
           chars: i.chars,
           error: i.error ?? undefined,
           usedExtractor: i.usedExtractor ?? undefined,
+          ai: i.ai,
         })),
       },
     });

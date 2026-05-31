@@ -8,11 +8,15 @@ if not defined ACTION set "ACTION=restart"
 if /i "%ACTION%"=="stop"   goto STOP
 if /i "%ACTION%"=="start"  goto START
 if /i "%ACTION%"=="restart" goto RESTART
+if /i "%ACTION%"=="service-restart" goto SERVICE_RESTART
+if /i "%ACTION%"=="service-stop" goto SERVICE_STOP
 
 echo.
-echo %~nx0  stop     — остановить все lena-bot ^(node + служба tender-prep-lena^)
-echo %~nx0  start    — запустить бота в этом окне ^(если уже работает — не дублировать^)
-echo %~nx0  restart  — stop, пауза, deleteWebhook, start ^(по умолчанию^)
+echo %~nx0  stop              — остановить node + службу tender-prep-lena
+echo %~nx0  start             — бот в этом окне ^(отладка^)
+echo %~nx0  restart            — stop, webhook, start в окне ^(только если НЕТ службы^)
+echo %~nx0  service-restart   — для сервера 24/7: stop, webhook, Restart-Service
+echo %~nx0  service-stop       — остановить службу и все node
 echo.
 pause
 exit /b 1
@@ -30,16 +34,39 @@ echo Готово. Окно можно закрыть.
 pause
 exit /b 0
 
+:SERVICE_STOP
+call :DO_STOP 0
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Stop-Service -Name 'tender-prep-lena' -Force -ErrorAction SilentlyContinue"
+echo Служба tender-prep-lena остановлена ^(если была установлена^).
+pause
+exit /b 0
+
+:SERVICE_RESTART
+call :DO_STOP 1
+if errorlevel 2 goto RESTART_BLOCKED
+call :WAIT_TELEGRAM
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$s = Get-Service -Name 'tender-prep-lena' -ErrorAction SilentlyContinue; if (-not $s) { Write-Host 'Служба tender-prep-lena не найдена. Установите: scripts\lena-server\install-service-nssm.ps1'; exit 1 }; Restart-Service -Name 'tender-prep-lena' -Force; Write-Host 'Restart-Service tender-prep-lena: ok'"
+if errorlevel 1 (
+  echo.
+  echo [Ошибка] Не удалось перезапустить службу. См. install-service-nssm.ps1
+  pause
+  exit /b 1
+)
+echo.
+echo Бот работает как служба. Логи: logs\lena-bot.log и logs\lena-bot.err.log
+pause
+exit /b 0
+
+:RESTART_BLOCKED
+echo.
+echo [Ошибка] Перезапуск отменён: lena-bot всё ещё запущен.
+pause
+exit /b 2
+
 :RESTART
 call :DO_STOP 1
-if errorlevel 2 (
-  echo.
-  echo [Ошибка] Перезапуск отменён: lena-bot всё ещё запущен где-то ещё.
-  echo Закройте второе окно, остановите службу tender-prep-lena или бот на другом ПК.
-  echo.
-  pause
-  exit /b 2
-)
+if errorlevel 2 goto RESTART_BLOCKED
 call :WAIT_TELEGRAM
 goto START_RUN
 

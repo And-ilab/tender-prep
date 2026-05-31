@@ -16,6 +16,7 @@ function usage() {
     "",
     "  node src/cli.js drive …                        — Google Drive (см. node src/cli.js drive)",
     "  node src/cli.js tenders …                     — IceTrade → Drive (см. node src/cli.js tenders)",
+    "  node src/cli.js analysis …                    — анализ для КП (см. node src/cli.js analysis commercial-prompt …)",
     "  node src/cli.js rag …                          — RAG: индекс по локальному корпусу, query, ask (см. node src/cli.js rag)",
     "",
   ];
@@ -37,6 +38,12 @@ async function main(argv) {
     if (cmd === "drive") {
       const { runDrive } = await import("./drive/cli.js");
       await runDrive(argv.slice(3));
+      return;
+    }
+
+    if (cmd === "analysis") {
+      const { runAnalysisCli } = await import("./analysis/cli.js");
+      await runAnalysisCli(argv.slice(3));
       return;
     }
 

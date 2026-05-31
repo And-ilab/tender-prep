@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Пошаговая отладка в **видимом** Chromium: карточка → раскрытие блока документов → клик по getFile.
+ * Пошаговая отладка в **видимом** Chromium: карточка → документы → клик по строке (часто модал «Загрузка файла») → клик по PDF в модалке.
  * Между шагами жмите Enter в консоли. Нужен Playwright + chromium.
  *
  *   cd C:\tender-prep
@@ -14,6 +14,7 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
 import { normalizeIceTradeViewId } from "../src/icetrade/viewIds.js";
+import { resolveIceTradeModalPdfLink, clickIceTradeModalLinkReliable, applyPlaywrightDownloadsPath, readIceTradeLinkSiteFilename, persistIceTradePlaywrightDownload, getPlaywrightDownloadsDir, maybeCleanupPlaywrightDownloadsBase } from "../src/icetrade/fetchPageRendered.js";
 
 function loadEnvFromRepoRoot() {
   const envPath = join(process.cwd(), ".env");
@@ -88,6 +89,8 @@ try {
 
   await pause(rl, "Шаг 0: сейчас откроется Chromium (окно должно быть видно).");
 
+  await maybeCleanupPlaywrightDownloadsBase();
+
   browser = await playwright.chromium.launch({ headless: false });
   /** @type {import('playwright').BrowserContextOptions} */
   const ctxOpts = {
@@ -100,6 +103,7 @@ try {
   const cookie = process.env.LENA_ICETRADE_COOKIE?.trim();
   if (cookie) ctxOpts.extraHTTPHeaders = { ...ctxOpts.extraHTTPHeaders, Cookie: cookie };
   if (storagePath) ctxOpts.storageState = storagePath;
+  applyPlaywrightDownloadsPath(ctxOpts, viewId || undefined);
 
   const context = await browser.newContext(ctxOpts);
   const page = await context.newPage();
@@ -168,10 +172,14 @@ try {
     link = loose.nth(idx);
   }
 
-  await pause(rl, `Шаг 3: клик по ссылке getFile (n=${nParam}, индекс ${Number.isFinite(nIdx) ? nIdx : 0}). Следите за вкладкой / загрузкой.`);
+  await pause(rl, `Шаг 3a: клик по док-ссылке в таблице (n=${nParam}). Часто открывается «Загрузка файла».`);
 
   await link.scrollIntoViewIfNeeded().catch(() => {});
   await link.waitFor({ state: "visible", timeout: 20_000 });
+
+  const tableLinkFilename = await readIceTradeLinkSiteFilename(link);
+  /** @type {string | null} */
+  let modalLinkFilename = null;
 
   const fileUrlGuess = `https://icetrade.by/auction/getFile/auction/${viewId}?f=detail&n=${nParam}`;
   const respPredicate = (/** @type {import('playwright').Response} */ r) => {
@@ -188,28 +196,100 @@ try {
   };
 
   const t = timeoutMs();
-  const respP = page.waitForResponse(respPredicate, { timeout: t }).then((r) => ({ kind: "resp", r }));
-  const dlP = page.waitForEvent("download", { timeout: t }).then((d) => ({ kind: "dl", d }));
+  const firstWaitMs = Math.min(18_000, t);
+  const modalHeading = page.getByText(/Загрузка\s+файла/i).first();
+
+  const pResp = page
+    .waitForResponse(respPredicate, { timeout: firstWaitMs })
+    .then((r) => /** @type {const} */ (["resp", r]))
+    .catch(() => /** @type {const} */ (["none", null]));
+  const pDl = page
+    .waitForEvent("download", { timeout: firstWaitMs })
+    .then((d) => /** @type {const} */ (["dl", d]))
+    .catch(() => /** @type {const} */ (["none", null]));
+  const pModal = modalHeading
+    .waitFor({ state: "visible", timeout: firstWaitMs })
+    .then(() => /** @type {const} */ (["modal", null]))
+    .catch(() => /** @type {const} */ (["none", null]));
+
   await link.click({ timeout: 20_000 });
 
-  const winner = await Promise.race([respP, dlP]).catch(() => null);
+  const [tag, payload] = await Promise.race([pResp, pDl, pModal]);
+
+  /** @type {{ kind: "resp"; r: import("playwright").Response } | { kind: "dl"; d: import("playwright").Download } | null} */
+  let winner = null;
+  if (tag === "resp" && payload) {
+    winner = { kind: "resp", r: /** @type {import("playwright").Response} */ (payload) };
+  } else if (tag === "dl" && payload) {
+    winner = { kind: "dl", d: /** @type {import("playwright").Download} */ (payload) };
+  }
+
+  if (
+    !winner &&
+    (tag === "modal" || (await modalHeading.isVisible().catch(() => false)))
+  ) {
+    await pause(rl, "Шаг 3b: в модалке «Загрузка файла» сейчас кликну по ссылке PDF (финальная загрузка).");
+    await new Promise((r) => setTimeout(r, 400));
+    const innerLink = await resolveIceTradeModalPdfLink(page, viewId, nParam);
+    if (innerLink) {
+      modalLinkFilename = await readIceTradeLinkSiteFilename(innerLink);
+      await innerLink.scrollIntoViewIfNeeded().catch(() => {});
+      const innerResp = page
+        .waitForResponse(respPredicate, { timeout: t })
+        .then((r) => /** @type {const} */ ({ kind: "resp", r }))
+        .catch(() => /** @type {const} */ ({ kind: "none" }));
+      const innerDl = page
+        .waitForEvent("download", { timeout: t })
+        .then((d) => /** @type {const} */ ({ kind: "dl", d }))
+        .catch(() => /** @type {const} */ ({ kind: "none" }));
+      const innerPop = page
+        .waitForEvent("popup", { timeout: t })
+        .then((p) => /** @type {const} */ ({ kind: "pop", p }))
+        .catch(() => /** @type {const} */ ({ kind: "none" }));
+      await clickIceTradeModalLinkReliable(innerLink);
+      const w2 = await Promise.race([innerResp, innerDl, innerPop]);
+      if (w2.kind === "resp" || w2.kind === "dl") winner = w2;
+      else if (w2.kind === "pop") {
+        const pop = /** @type {{ kind: "pop"; p: import("playwright").Page }} */ (w2).p;
+        try {
+          const r2 = await pop.waitForResponse(respPredicate, { timeout: t }).catch(() => null);
+          if (r2) winner = { kind: "resp", r: r2 };
+        } finally {
+          await pop.close().catch(() => {});
+        }
+      }
+    } else {
+      console.error("    Не нашёл ссылку PDF внутри модалки — проверьте селекторы.");
+    }
+  }
+
+  if (!winner) {
+    const pop = await page.waitForEvent("popup", { timeout: 5000 }).catch(() => null);
+    if (pop) {
+      console.error(`    Открылась новая вкладка: ${pop.url()}`);
+      await pop.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => {});
+      await pop.close().catch(() => {});
+    }
+  }
+
   if (winner?.kind === "resp") {
     const buf = Buffer.from(await winner.r.body());
     const ct = winner.r.headers()["content-type"] || "";
     console.error(`    Ответ getFile: ${buf.length} байт, Content-Type: ${ct || "(нет)"}`);
     console.error(`    Сигнатура: ${buf.subarray(0, 5).toString("latin1")}`);
   } else if (winner?.kind === "dl") {
-    const p = await winner.d.path();
-    console.error(`    Скачивание: ${winner.d.suggestedFilename()}, временный файл: ${p || "(нет)"}`);
-  } else {
-    const pop = await page.waitForEvent("popup", { timeout: 5000 }).catch(() => null);
-    if (pop) {
-      console.error(`    Открылась новая вкладка: ${pop.url()}`);
-      await pop.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => {});
-      await pop.close().catch(() => {});
-    } else {
-      console.error("    Не поймали ответ getFile ни как документ, ни как download — смотрите окно браузера.");
+    const domHint = modalLinkFilename ?? tableLinkFilename;
+    let saved = "(не удалось сохранить)";
+    try {
+      saved = await persistIceTradePlaywrightDownload(winner.d, domHint, viewId || undefined);
+    } catch {
+      const p = await winner.d.path().catch(() => null);
+      saved = p || winner.d.suggestedFilename() || saved;
     }
+    console.error(`    Скачивание → ${saved}`);
+    console.error(`    Папка загрузок контекста: ${getPlaywrightDownloadsDir(viewId || undefined)}`);
+  } else {
+    console.error("    Не поймали ответ getFile ни как документ, ни как download — смотрите окно браузера.");
   }
 
   console.error(`\nОжидаемый URL файла (для сверки): ${fileUrlGuess}`);

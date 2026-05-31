@@ -65,6 +65,19 @@ export async function getUserOAuthAccessToken(clientSecretsPath, tokenPath) {
   });
   const json = /** @type {Record<string, unknown>} */ (await res.json());
   if (!res.ok || typeof json.access_token !== "string") {
+    const err = typeof json.error === "string" ? json.error : "";
+    if (err === "invalid_grant") {
+      throw new Error(
+        [
+          "OAuth refresh: refresh_token недействителен (истёк или отозван).",
+          "Что сделать:",
+          "1) https://myaccount.google.com/permissions — удалите доступ приложения Лены (если есть).",
+          "2) На машине, где запущен бот: node src/cli.js drive oauth-login (те же GOOGLE_DRIVE_OAUTH_CLIENT и GOOGLE_DRIVE_OAUTH_TOKEN).",
+          "3) Перезапустите бота.",
+          "Если OAuth-приложение в GCP в режиме «Testing» — refresh_token живёт ~7 дней; добавьте свой email в тестовые пользователи или опубликуйте экран согласия.",
+        ].join("\n"),
+      );
+    }
     throw new Error(`OAuth refresh: ${JSON.stringify(json)}`);
   }
   const expiresIn = typeof json.expires_in === "number" ? json.expires_in : 3600;
@@ -93,7 +106,7 @@ export async function runOAuthLoginInteractive(clientSecretsPath, tokenOutPath) 
     client_id: client.client_id,
     redirect_uri: redirectUri,
     response_type: "code",
-    scope: "https://www.googleapis.com/auth/drive",
+    scope: "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents",
     access_type: "offline",
     prompt: "consent",
   });

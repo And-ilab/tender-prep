@@ -12,7 +12,25 @@ import {
 } from "../drive/ops.js";
 import { ensureTenderTree } from "../drive/workspace.js";
 import { chatCompletion, isLlmConfigured } from "../llm/openaiCompatible.js";
+import { jsonrepair } from "jsonrepair";
 import { runQuery } from "../rag/queryLocal.js";
+import { buildParsedInputsCorpus } from "../analysis/parsedInputsCorpus.js";
+import {
+  buildPreparationPromptMarkdown,
+  PREPARATION_PROMPT_FILENAME,
+  replacePreparationPromptFile,
+} from "../analysis/preparationPromptFromAnalysis.js";
+import {
+  corpusMentionsPriceReductionProcedure,
+  corpusSuggestsAbsurdStatedPrice,
+} from "../analysis/pricingPolicy.js";
+import { formatAnalysisMatrixBullets } from "../analysis/analysisMatrixBullets.js";
+import {
+  buildSnapshotCorpusAugmentation,
+  readIceTradeImportSnapshot,
+  snapshotBidsDeadlineHint,
+  snapshotProcedureBudgetHint,
+} from "../analysis/cpSnapshotHints.js";
 
 function safeSliceName(name) {
   return String(name)
@@ -89,6 +107,8 @@ async function extractTextSnippet(fileId, name, mimeType, tmpRoot) {
 }
 
 /**
+ * Разбор JSON от LLM: часты хвостовые запятые, кавычки/переносы в цитатах — без ремонта парсинг падает,
+ * хотя извлечение текста из PDF прошло успешно.
  * @param {string} raw
  */
 function parseLlmJson(raw) {
@@ -97,7 +117,38 @@ function parseLlmJson(raw) {
   const i = s.indexOf("{");
   const j = s.lastIndexOf("}");
   if (i >= 0 && j > i) s = s.slice(i, j + 1);
-  return /** @type {Record<string, unknown>} */ (JSON.parse(s));
+
+  /** @param {string} x */
+  const stripTrailingCommas = (x) => {
+    let cur = x;
+    for (let n = 0; n < 8; n += 1) {
+      const next = cur.replace(/,\s*([}\]])/g, "$1");
+      if (next === cur) break;
+      cur = next;
+    }
+    return cur;
+  };
+
+  /** @param {string} x */
+  const tryParse = (x) => /** @type {Record<string, unknown>} */ (JSON.parse(x));
+
+  try {
+    return tryParse(s);
+  } catch (eFirst) {
+    try {
+      return tryParse(stripTrailingCommas(s));
+    } catch {
+      try {
+        return tryParse(jsonrepair(stripTrailingCommas(s)));
+      } catch {
+        try {
+          return tryParse(jsonrepair(s));
+        } catch {
+          throw eFirst;
+        }
+      }
+    }
+  }
 }
 
 /**
@@ -143,6 +194,10 @@ function normalizeAnalysis(o) {
   const sumOrBudget = typeof o.sumOrBudget === "string" ? o.sumOrBudget.trim() : null;
   const submissionOverview =
     typeof o.submissionOverview === "string" ? o.submissionOverview.trim() : null;
+  const submissionMethod =
+    typeof o.submissionMethod === "string" ? o.submissionMethod.trim() : null;
+  const submissionDeadline =
+    typeof o.submissionDeadline === "string" ? o.submissionDeadline.trim() : null;
 
   /** @type {{ name: string; basis: string; evidence: string }[]} */
   const lenaCanPrepare = [];
@@ -184,6 +239,8 @@ function normalizeAnalysis(o) {
     tenderTitle: tenderTitle || null,
     sumOrBudget: sumOrBudget || null,
     submissionOverview: submissionOverview || null,
+    submissionMethod: submissionMethod || null,
+    submissionDeadline: submissionDeadline || null,
     lenaCanPrepare,
     managerMustProvide,
   };
@@ -263,6 +320,8 @@ function applyStrictCorpusGrounding(parsed, corpus) {
       tenderTitle: null,
       sumOrBudget: null,
       submissionOverview: null,
+      submissionMethod: null,
+      submissionDeadline: null,
       lenaCanPrepare: [],
       managerMustProvide: [],
     };
@@ -293,17 +352,49 @@ function applyStrictCorpusGrounding(parsed, corpus) {
     structured = { ...structured, submissionOverview: null };
   }
 
+  const smEv =
+    typeof parsed.submissionMethodEvidence === "string" ? parsed.submissionMethodEvidence.trim() : "";
+  if (structured.submissionMethod && !evidenceAppearsInCorpus(smEv, c)) {
+    structured = { ...structured, submissionMethod: null };
+  }
+
+  const sdEv =
+    typeof parsed.submissionDeadlineEvidence === "string" ? parsed.submissionDeadlineEvidence.trim() : "";
+  if (structured.submissionDeadline && !evidenceAppearsInCorpus(sdEv, c)) {
+    structured = { ...structured, submissionDeadline: null };
+  }
+
   return structured;
 }
 
-function buildAnalysisMarkdown(viewId, structured, notParsedFiles, ragUsed) {
+/**
+ * Подстановка суммы/дедлайна с карточки IceTrade, если в КД в inputs их не удалось выделить с цитатой.
+ * @param {ReturnType<typeof normalizeAnalysis>} structured
+ * @param {unknown} snap
+ */
+function applySnapshotFieldFallbacks(structured, snap) {
+  const out = { ...structured };
+  if (!String(out.sumOrBudget ?? "").trim()) {
+    const h = snapshotProcedureBudgetHint(snap);
+    if (h) out.sumOrBudget = h;
+  }
+  if (!String(out.submissionDeadline ?? "").trim()) {
+    const d = snapshotBidsDeadlineHint(snap);
+    if (d) out.submissionDeadline = d;
+  }
+  return out;
+}
+
+function buildAnalysisMarkdown(viewId, structured, notParsedFiles, ragUsed, usedParsedPipeline) {
   const lines = [
     `# IceTrade · анализ комплекта · ${viewId}`,
     "",
     `- UTC: ${new Date().toISOString()}`,
     `- RAG: ${ragUsed ? "да (фрагменты в промпт)" : "нет"}`,
+    `- Корпус для модели: ${usedParsedPipeline ? "полный распарсенный текст (**tender-pipeline-state**)" : "укороченные фрагменты из файлов **inputs**"}`,
     "",
-    "> **Источник требований:** только фрагменты из **inputs** ниже (в т.ч. \`icetrade-import-snapshot.json\` — явное с карточки IceTrade, и извлечённый текст вложений). Без додумываний; не упомянуто — не выводится.",
+    "> **Источник требований:** только текст из **inputs** ниже (в т.ч. блок **«Данные карточки IceTrade»** из \`icetrade-import-snapshot.json\` и **распарсенный** текст вложений). Без додумываний; не упомянуто — не выводится.",
+    "> **Участник:** для наших организаций (**ГС Ритейл**, **Финсельват**) считаем **резидентом РБ**; пункты требований **только для нерезидентов** в отчёт и матрицу **не включаем**.",
     "",
     "## Наименование / предмет",
     structured.tenderTitle || "_(не выделено автоматически)_",
@@ -311,26 +402,17 @@ function buildAnalysisMarkdown(viewId, structured, notParsedFiles, ragUsed) {
     "## Сумма / начальная (макс.) цена / бюджет",
     structured.sumOrBudget || "_(не выделено — проверьте в ТЗ/извещении)_",
     "",
+    "## Способ подачи (канал)",
+    structured.submissionMethod || "—",
+    "",
+    "## Дедлайн (окончание приёма заявок)",
+    structured.submissionDeadline || "—",
+    "",
     "## Перечень к подаче (кратко)",
     structured.submissionOverview || "—",
     "",
-    "## Что может подготовить Лена (только если в тексте inputs/карточки есть явная опора)",
-    structured.lenaCanPrepare.length
-      ? structured.lenaCanPrepare.map((x) => `- **${x.name}** — ${x.basis}`).join("\n")
-      : "—",
-    "",
-    "## Что нужны данные/оригиналы у менеджера (только если это прямо следует из текста)",
-    structured.managerMustProvide.length
-      ? structured.managerMustProvide
-          .map((x) => {
-            const crit =
-              x.criteria && x.criteria !== "—"
-                ? `\n  - **Сроки / форма / параметры:** ${x.criteria}`
-                : "";
-            return `- **${x.name}** — ${x.reason}${crit}`;
-          })
-          .join("\n")
-      : "—",
+    "## Матрица требований (строки только с цитатой из текста)",
+    formatAnalysisMatrixBullets(structured),
     "",
     "## Файлы без извлечённого текста (PDF/DOC и т.п. — нужен parserit / ручной разбор)",
     notParsedFiles.length ? notParsedFiles.map((n) => `- ${n}`).join("\n") : "- нет",
@@ -384,38 +466,58 @@ export function formatIceTradeAnalysisForTelegram(r) {
   const { structured, notParsedFiles, ragUsed } = r;
   const rootL = "tenderRootWebViewLink" in r ? r.tenderRootWebViewLink : undefined;
   const inL = "inputsFolderWebViewLink" in r ? r.inputsFolderWebViewLink : undefined;
+  const fromPipeline =
+    "usedParsedPipeline" in r && r.usedParsedPipeline ? " **(корпус после парсинга inputs)**" : "";
+  const ph = "pricingHints" in r && r.pricingHints ? r.pricingHints : null;
+  /** @type {string | undefined} */
+  let pricingLine;
+  if (ph) {
+    if (ph.absurdStatedPrice) {
+      pricingLine =
+        "**Цена для КП:** в тексте встречается подозрительная сумма/заглушка — **только через менеджера** (сумма и НДС).";
+    } else if (ph.reductionProcedure) {
+      pricingLine =
+        "**Цена для КП:** по тексту есть **процедура снижения** — в черновике укажи **только стартовую цену** из документов заказчика (без самовольных скидок).";
+    } else {
+      pricingLine =
+        "**Цена для КП:** процедура снижения **не выявлена** — **запроси у менеджера цену** и **НДС (с/без)** по закупке, не придумывай сумму.";
+    }
+  }
+  const prepLink =
+    "preparationPromptFile" in r &&
+    r.preparationPromptFile &&
+    typeof /** @type {{ webViewLink?: string }} */ (r.preparationPromptFile).webViewLink === "string"
+      ? /** @type {{ webViewLink?: string }} */ (r.preparationPromptFile).webViewLink
+      : undefined;
   const lines = [
     "---",
     "**Результат разбора комплекта**",
     "",
-    "_Источник: только текст из **inputs** (файлы заказчика + снимок карточки с IceTrade). Пункты без дословной опоры в этом тексте отброшены._",
+    `_Источник: только текст из **inputs** + снимок карточки IceTrade (если он в inputs). Пункты матрицы без дословной опоры в этом тексте отброшены._${fromPipeline}`,
     "",
     ...(rootL ? [`**Папка тендера (Google Drive):** ${rootL}`] : []),
     ...(inL ? [`**Документы заказчика (inputs):** ${inL}`] : []),
     ...(rootL || inL ? [""] : []),
+    ...(pricingLine ? [pricingLine, ""] : []),
+    "**Компания для черновика КП:** выбрать **ГС Ритейл** или **Финсельват** (кнопки ниже), затем **«Сформировать КП»** или **/tenderkp**.",
+    prepLink
+      ? `**Промпт для модуля Preparation:** **\`${PREPARATION_PROMPT_FILENAME}\`** в **notes** — ${prepLink}`
+      : "**Промпт для модуля Preparation:** не удалось записать файл в **notes** (см. ошибку ниже).",
+    "",
+    "**Дальше:** **«Сформировать КП»** или **/tenderkp** подставляют промпт и корпус; **ссылка на КП** — в следующих сообщениях после генерации.",
+    "",
     `**Наименование:** ${structured.tenderTitle || "— (уточните по документам)"}`,
     `**Сумма / бюджет:** ${structured.sumOrBudget || "— (уточните в извещении/ТЗ)"}`,
+    "",
+    `**Способ подачи:** ${structured.submissionMethod || "—"}`,
+    `**Дедлайн (окончание приёма):** ${structured.submissionDeadline || "—"}`,
     "",
     structured.submissionOverview
       ? `**К подаче (суть):** ${structured.submissionOverview}`
       : "",
     "",
-    "**Что может подготовить Лена** (только при дословной цитате во входном тексте):",
-    structured.lenaCanPrepare.length
-      ? structured.lenaCanPrepare.map((x) => `• ${x.name} — _${x.basis}_`).join("\n")
-      : "• _(нет пунктов с цитатой из текста — загрузите/распарсьте КД в **inputs** или проверьте **icetrade-import-snapshot.json**.)_",
-    "",
-    "**Что от менеджера / с площадки** (только если явно сказано во входном тексте):",
-    structured.managerMustProvide.length
-      ? structured.managerMustProvide
-          .map((x) => {
-            const c = x.criteria && x.criteria !== "—" ? x.criteria.trim() : "";
-            return c
-              ? `• **${x.name}** — _${x.reason}_\n  _Сроки / форма / параметры:_ _${c}_`
-              : `• **${x.name}** — _${x.reason}_`;
-          })
-          .join("\n\n")
-      : "• _(не выделено по тексту — без додумываний.)_",
+    "**Матрица требований** (строки только с дословной цитатой во входном тексте):",
+    formatAnalysisMatrixBullets(structured),
     "",
     notParsedFiles.length
       ? `**Без авто-текста (нужен разбор):** ${notParsedFiles.slice(0, 12).join(", ")}${notParsedFiles.length > 12 ? "…" : ""}`
@@ -429,6 +531,9 @@ export function formatIceTradeAnalysisForTelegram(r) {
               : "";
           return `\n**Заметка на Drive не записана:** ${msg}${quotaHint}`;
         })()
+      : "",
+    "preparationPromptUploadError" in r && r.preparationPromptUploadError
+      ? `\n**Файл Preparation не записан:** ${String(r.preparationPromptUploadError).slice(0, 600)}`
       : "",
     ragUsed
       ? "\n_В промпт подмешан архив RAG (**LENA_ICETRADE_ANALYZE_USE_RAG**); строки матрицы всё равно только из текста inputs._"
@@ -456,6 +561,14 @@ export async function analyzeTenderAfterBootstrap(userRootId, tenderId, opts = {
     Number.parseInt(process.env.LENA_ICETRADE_ANALYZE_MAX_FILES?.trim() ?? "35", 10) || 35;
   const maxCorpus =
     Number.parseInt(process.env.LENA_ICETRADE_ANALYZE_MAX_CORPUS?.trim() ?? "42000", 10) || 42_000;
+  const pipelineMaxCorpus =
+    Number.parseInt(process.env.LENA_ICETRADE_ANALYZE_PIPELINE_MAX_CORPUS?.trim() ?? "120000", 10) ||
+    120_000;
+  const pipelineMaxFiles =
+    Number.parseInt(process.env.LENA_ICETRADE_ANALYZE_PIPELINE_MAX_FILES?.trim() ?? "60", 10) || 60;
+
+  const minInput =
+    Number.parseInt(process.env.LENA_ICETRADE_ANALYZE_MIN_INPUT_CHARS?.trim() ?? "120", 10) || 120;
 
   const { tender } = await ensureTenderTree(userRootId, tenderId, opts);
   const inputsId = tender.inputsId;
@@ -476,41 +589,57 @@ export async function analyzeTenderAfterBootstrap(userRootId, tenderId, opts = {
   }
 
   const files = await listChildren(inputsId);
+
+  const pipelineCorpus = await buildParsedInputsCorpus(userRootId, tenderId, opts, {
+    maxFiles: pipelineMaxFiles,
+    maxTotalChars: pipelineMaxCorpus,
+  });
+
   /** @type {string[]} */
-  const notParsedFiles = [];
+  let notParsedFiles = [];
   /** @type {string[]} */
   const corpusParts = [];
+  let usedParsedPipeline = false;
+  /** @type {string} */
+  let corpus = "";
 
-  const tmpRoot = await mkdtemp(join(tmpdir(), "lena-analyze-"));
-  try {
-    let n = 0;
-    for (const f of files) {
-      if (n >= maxFiles) break;
-      const id = String(f.id ?? "");
-      const name = String(f.name ?? "file");
-      if (!id) continue;
-      const mime = typeof f.mimeType === "string" ? f.mimeType : "";
-      if (mime === "application/vnd.google-apps.folder") continue;
-
-      n += 1;
-      const meta = await getMetadata(id).catch(() => null);
-      const mimeType = meta && typeof meta.mimeType === "string" ? meta.mimeType : mime;
-      const snip = await extractTextSnippet(id, name, mimeType, tmpRoot);
-      if (snip && snip.trim().length > 40) {
-        corpusParts.push(`### Файл: ${name}\n${snip.trim()}`);
-      } else {
-        notParsedFiles.push(name);
-      }
+  if (pipelineCorpus.usedPipeline && pipelineCorpus.inputTextChars >= minInput) {
+    corpus = pipelineCorpus.corpus.trim();
+    if (corpus.length > pipelineMaxCorpus) {
+      corpus = `${corpus.slice(0, pipelineMaxCorpus)}\n\n…[усечено]`;
     }
-  } finally {
-    await rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
+    notParsedFiles = [...pipelineCorpus.notParsedFiles];
+    usedParsedPipeline = true;
+  } else {
+    const tmpRoot = await mkdtemp(join(tmpdir(), "lena-analyze-"));
+    try {
+      let n = 0;
+      for (const f of files) {
+        if (n >= maxFiles) break;
+        const id = String(f.id ?? "");
+        const name = String(f.name ?? "file");
+        if (!id) continue;
+        const mime = typeof f.mimeType === "string" ? f.mimeType : "";
+        if (mime === "application/vnd.google-apps.folder") continue;
+
+        n += 1;
+        const meta = await getMetadata(id).catch(() => null);
+        const mimeType = meta && typeof meta.mimeType === "string" ? meta.mimeType : mime;
+        const snip = await extractTextSnippet(id, name, mimeType, tmpRoot);
+        if (snip && snip.trim().length > 40) {
+          corpusParts.push(`### Файл: ${name}\n${snip.trim()}`);
+        } else {
+          notParsedFiles.push(name);
+        }
+      }
+    } finally {
+      await rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
+    }
+
+    corpus = corpusParts.join("\n\n").trim();
+    if (corpus.length > maxCorpus) corpus = `${corpus.slice(0, maxCorpus)}\n\n…[усечено]`;
   }
 
-  let corpus = corpusParts.join("\n\n").trim();
-  if (corpus.length > maxCorpus) corpus = `${corpus.slice(0, maxCorpus)}\n\n…[усечено]`;
-
-  const minInput =
-    Number.parseInt(process.env.LENA_ICETRADE_ANALYZE_MIN_INPUT_CHARS?.trim() ?? "120", 10) || 120;
   const inputTextChars = corpus.replace(/\s+/g, " ").trim().length;
 
   let inputsFileCount = 0;
@@ -558,25 +687,32 @@ export async function analyzeTenderAfterBootstrap(userRootId, tenderId, opts = {
     }
   }
 
+  const corpusBlockTitle = usedParsedPipeline
+    ? "### Текст документов заказчика (полный распарсенный корпус по tender-pipeline-state)"
+    : "### Фрагменты из inputs";
+
   const system = [
     "Ты «Лена» — специалист по тендерам (IceTrade). Отвечай только JSON без Markdown и без текста вне JSON.",
-    "Источник истины — **один** блок пользователя: «### Фрагменты из inputs». Там: извлечённый текст файлов заказчика из папки inputs и снимок карточки с сайта IceTrade (если есть в inputs). Карточка часто короче КД, но считается явным текстом площадки.",
-    "Жёсткий запрет: не дополнять типовыми требованиями РБ, «обычно нужно», здравым смыслом или блоком RAG. Не перечисляй справку банка, выписку ЕГР/торгреестра, референс-лист, учредительные, доверенности и т.п., если в «Фрагменты из inputs» этого **нет явно** (формулировка или перечень). Заказчик сверяет пакет со своей КД — лишнее = вред.",
+    "Источник истины — **один** блок пользователя: либо «### Текст документов заказчика (полный распарсенный корпус по tender-pipeline-state)», либо «### Фрагменты из inputs». В обоих случаях там только материал из папки **inputs** заказчика (в т.ч. снимок карточки IceTrade, если он лежит в inputs). В полном корпусе — выгрузка по manifest/state после парсинга; во фрагментах — укороченные выдержки из тех же файлов.",
+    "Жёсткий запрет: не дополнять типовыми требованиями РБ, «обычно нужно», здравым смыслом или блоком RAG. Не перечисляй справку банка, выписку ЕГР/торгреестра, референс-лист, учредительные, доверенности и т.п., если в блоке с текстом заказчика этого **нет явно** (формулировка или перечень). Заказчик сверяет пакет со своей КД — лишнее = вред.",
     "Правила полей:",
-    "- tenderTitle — только если кратко выводится из текста фрагментов; иначе null. Обязательно tenderTitleEvidence: дословная подстрока из «Фрагменты из inputs» (15+ символов), подтверждающая наименование; иначе tenderTitle=null.",
-    "- sumOrBudget — одна строка только при явных цифрах/формулировке бюджета в фрагментах; иначе null. Обязательно sumOrBudgetEvidence: дословная citation из фрагментов (15+ символов); иначе sumOrBudget=null.",
-    "- submissionOverview — 1–4 предложения только как пересказ того, что **прямо сказано** во фрагментах о составе заявки / подаче; иначе null. Обязательно submissionOverviewQuotes: массив из 1–4 **дословных** цитат из фрагментов (каждая 15+ символов), на которых основан пересказ; если не можешь набрать цитаты — submissionOverview=null и массив пустой.",
-    "- lenaCanPrepare[]: только документ/действие, явно следующие из текста заказчика или карточки. У каждого элемента: name, basis (кратко откуда по смыслу), evidence — дословная цитата 15+ символов из фрагментов. Нет цитаты — не включай элемент. Никаких «аналог из RAG».",
-    "- managerMustProvide[]: только если участнику/менеджеру **прямо** требуется внешний документ или данные по тексту фрагментов. evidence — дословная цитата 15+ символов. criteria — только то, что дословно или почти дословно есть во фрагментах; иначе null (не заполняй «типично для РБ»).",
+    "- tenderTitle — только если кратко выводится из текста фрагментов; иначе null. Обязательно tenderTitleEvidence: дословная подстрока из того же блока (15+ символов), подтверждающая наименование; иначе tenderTitle=null.",
+    "- sumOrBudget — одна строка только при явных цифрах/формулировке бюджета в фрагментах; иначе null. Обязательно sumOrBudgetEvidence: дословная citation из блока (15+ символов); иначе sumOrBudget=null.",
+    "- submissionOverview — 1–4 предложения только как пересказ того, что **прямо сказано** в блоке о составе заявки / подаче; иначе null. Обязательно submissionOverviewQuotes: массив из 1–4 **дословных** цитат из блока (каждая 15+ символов), на которых основан пересказ; если не можешь набрать цитаты — submissionOverview=null и массив пустой.",
+    "- submissionMethod — одна строка: **способ подачи** заявки/документов (площадка, лично, ЭП, адрес и т.д.) **только** если явно в блоке; иначе null. submissionMethodEvidence — дословная цитата 15+ символов; иначе submissionMethod=null.",
+    "- submissionDeadline — одна строка: **дата/время окончания приёма** заявок (дедлайн), как в блоке; иначе null. submissionDeadlineEvidence — дословная цитата 15+ символов; иначе submissionDeadline=null.",
+    "- lenaCanPrepare[]: только документ/действие, явно следующие из текста заказчика или карточки. У каждого элемента: name, basis (кратко откуда по смыслу), evidence — дословная цитата 15+ символов из блока. Нет цитаты — не включай элемент. Никаких «аналог из RAG».",
+    "- managerMustProvide[]: только если участнику/менеджеру **прямо** требуется внешний документ или данные по тексту блока. evidence — дословная цитата 15+ символов. criteria — только то, что дословно или почти дословно есть в блоке; иначе null (не заполняй «типично для РБ»).",
+    "- **Резидент РБ:** обе наши организации (**ГС Ритейл** и **Финсельват**) — **резиденты Республики Беларусь**. **Не включай** в lenaCanPrepare и managerMustProvide требования, которые по тексту относятся **исключительно** к нерезидентам / иностранным участникам / особым правилам для нерезидентов — для матрицы их **пропускай**. Если в КД даны ветки «резидент / нерезидент», отражай в матрице **только ветку резидента**.",
     "Если фрагментов мало — пустые массивы и nullы нормальны.",
     "Форма ответа (ключи строго):",
-    '{"tenderTitle":string|null,"tenderTitleEvidence":string,"sumOrBudget":string|null,"sumOrBudgetEvidence":string,"submissionOverview":string|null,"submissionOverviewQuotes":string[],"lenaCanPrepare":[{"name":string,"basis":string,"evidence":string}],"managerMustProvide":[{"name":string,"reason":string,"criteria":string|null,"evidence":string}]}',
+    '{"tenderTitle":string|null,"tenderTitleEvidence":string,"sumOrBudget":string|null,"sumOrBudgetEvidence":string,"submissionOverview":string|null,"submissionOverviewQuotes":string[],"submissionMethod":string|null,"submissionMethodEvidence":string,"submissionDeadline":string|null,"submissionDeadlineEvidence":string,"lenaCanPrepare":[{"name":string,"basis":string,"evidence":string}],"managerMustProvide":[{"name":string,"reason":string,"criteria":string|null,"evidence":string}]}',
   ].join(" ");
 
   const userContent = [
     `viewId/tender_id на площадке: ${tenderId}`,
     "",
-    "### Фрагменты из inputs",
+    corpusBlockTitle,
     corpus.length ? corpus : "_(нет извлечённого текста — возможно только PDF/DOC; списки будут общими)_",
     "",
     isIcetradeAnalyzeRagEnabled()
@@ -589,6 +725,8 @@ export async function analyzeTenderAfterBootstrap(userRootId, tenderId, opts = {
     tenderTitle: null,
     sumOrBudget: null,
     submissionOverview: null,
+    submissionMethod: null,
+    submissionDeadline: null,
     lenaCanPrepare: /** @type {{ name: string; basis: string }[]} */ ([]),
     managerMustProvide: /** @type {{ name: string; reason: string; criteria: string }[]} */ ([]),
   };
@@ -615,7 +753,22 @@ export async function analyzeTenderAfterBootstrap(userRootId, tenderId, opts = {
     };
   }
 
-  const md = buildAnalysisMarkdown(tenderId, structured, notParsedFiles, ragUsed);
+  const generatedAtIso = new Date().toISOString();
+  const pricingHints = {
+    reductionProcedure: corpusMentionsPriceReductionProcedure(corpus),
+    absurdStatedPrice: corpusSuggestsAbsurdStatedPrice(corpus),
+  };
+
+  const preparationPrompt = buildPreparationPromptMarkdown({
+    tenderId,
+    structured,
+    corpus,
+    generatedAtIso,
+  });
+
+  const md =
+    buildAnalysisMarkdown(tenderId, structured, notParsedFiles, ragUsed, usedParsedPipeline) +
+    `\n\n---\n\n## Модуль Preparation\n\nВ папке **notes** тендера обновляется файл **\`${PREPARATION_PROMPT_FILENAME}\`** — **входной промпт** для генерации КП. **«Сформировать КП»** под сообщением (или **/tenderkp**) подставляет его в Preparation вместе с корпусом; черновик — в **drafts** (ссылка в Telegram после генерации).\n`;
   const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
   const noteName = `icetrade-analysis-${tenderId}-${stamp}.md`;
   const tmp = await mkdtemp(join(tmpdir(), "lena-anote-"));
@@ -623,6 +776,10 @@ export async function analyzeTenderAfterBootstrap(userRootId, tenderId, opts = {
   let noteUpload = null;
   /** @type {string | undefined} */
   let noteUploadError;
+  /** @type {Awaited<ReturnType<typeof replacePreparationPromptFile>> | null} */
+  let preparationPromptFile = null;
+  /** @type {string | undefined} */
+  let preparationPromptUploadError;
   try {
     const { writeFile } = await import("node:fs/promises");
     await writeFile(notePath, md, "utf8");
@@ -630,6 +787,11 @@ export async function analyzeTenderAfterBootstrap(userRootId, tenderId, opts = {
       noteUpload = await uploadFile(notesId, notePath, noteName);
     } catch (ue) {
       noteUploadError = ue instanceof Error ? ue.message : String(ue);
+    }
+    try {
+      preparationPromptFile = await replacePreparationPromptFile(notesId, preparationPrompt);
+    } catch (pe) {
+      preparationPromptUploadError = pe instanceof Error ? pe.message : String(pe);
     }
   } finally {
     await rm(tmp, { recursive: true, force: true }).catch(() => {});
@@ -640,6 +802,11 @@ export async function analyzeTenderAfterBootstrap(userRootId, tenderId, opts = {
     structured,
     notParsedFiles,
     ragUsed,
+    usedParsedPipeline,
+    pricingHints,
+    preparationPrompt,
+    preparationPromptFile,
+    preparationPromptUploadError,
     noteFile: noteUpload,
     noteUploadError,
     tenderNotesFolderId: notesId,

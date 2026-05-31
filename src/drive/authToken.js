@@ -8,7 +8,8 @@ import {
 } from "./config.js";
 import { clearUserOAuthCache, getUserOAuthAccessToken } from "./userOAuth.js";
 
-const SCOPE = "https://www.googleapis.com/auth/drive";
+/** Drive — файлы; Documents — batchUpdate для подстановки текста в Google Doc (КП по шаблону). */
+const SCOPE = "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 
 /** @type {{ token: string, until: number } | null} */

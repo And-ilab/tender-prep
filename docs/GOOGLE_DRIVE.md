@@ -14,11 +14,11 @@
 ```text
 <ваша корневая папка>/
   _lena/
-    templates/     ← шаблоны заявок (копируете в тендер через template-copy)
+    templates/     ← шаблоны заявок; внутри подпапки по юрлицу — **gs-retail**, **finselvat** (бланки, типовые письма); при необходимости общие файлы можно оставить в корне templates
     library/       ← справочники, регламенты, выдержки (не обязательно «шаблон на копирование»)
     context/       ← общий контекст между тендерами: стиль, глоссарий, фрагменты прошлых ответов
-    org-docs/      ← универсальные документы организации на все тендеры: справка банка (со сроком), бух. баланс, ОФР и т.п.; см. [LENA_RULES.md](LENA_RULES.md) §6b
-    founding-docs/ ← учредительные и редко меняющиеся: свидетельство о регистрации, устав, приказ о директоре; см. [LENA_RULES.md](LENA_RULES.md) §6c
+    org-docs/      ← операционные документы организации (справка банка со сроком, баланс, ОФР); внутри **gs-retail/** и **finselvat/** — не смешивать юрлица; см. [LENA_RULES.md](LENA_RULES.md) §6b
+    founding-docs/ ← учредительные и редко меняющиеся: устав, регистрация, приказ о директоре — те же **gs-retail/**, **finselvat/**; см. [LENA_RULES.md](LENA_RULES.md) §6c
     tenders/
       <ГГГГ>/                        ← по умолчанию текущий год (или LENA_DEFAULT_TENDER_YEAR)
         <tender_id>/
@@ -38,15 +38,15 @@
 
 **Важно:** если вы раньше создавали тендеры **без года** (`_lena/tenders/<id>/…`), для новых команд по умолчанию путь станет **с годом**. Старые папки не удаляются; для новых операций с тем же id без года передайте **`flat`**.
 
-**Шаблоны:** `_lena/templates` — `templates-list`, `agent-bundle`.
+**Шаблоны:** `_lena/templates` — `templates-list`, `agent-bundle`. Статика по компаниям (**ГС Ритейл** / **Финсельват**): подкаталоги **`gs-retail`** и **`finselvat`** (создаются при `workspace-ensure`). Имена совпадают с ключами в коде (`layoutConstants` ↔ выбор в Telegram при `/tenderkp`).
 
 **Справочники:** `_lena/library` — `library-list`, `agent-bundle` (поле `libraryFiles`).
 
 **Контекст:** `_lena/context` — `context-list`, `context-pull`, поле `contextFiles` в `agent-bundle`. Дополнительно можно задать **`LENA_EXTRA_CONTEXT_FOLDERS`**: через запятую/перенос строки — URL или id **других папок** на том же Диске (расшаренных на тот же сервисный аккаунт); файлы из корня каждой папки **подмешиваются** в тот же список и в бандл (с полями `lenaContextSource`, `lenaContextExtraRootId`). Вложенные подпапки внутри доп. корней не обходятся.
 
-**Универсальные документы организации:** `_lena/org-docs` — файлы, общие для **всех** тендеров (справка банка со сроком действия, бухгалтерский баланс, отчёт о прибылях и убытках и аналоги). Создаётся при `workspace-ensure`; список: `drive org-docs-list <root>`; в `agent-bundle` — поля **`lena.orgDocsFolderId`** и **`orgDocsFiles`**. Сценарий работы Лены (запрос загрузки, подтверждение через «Ответить», реестр, повторное использование) — в [LENA_RULES.md](LENA_RULES.md) (раздел 6b).
+**Документы организации (операционные):** `_lena/org-docs` — справка банка со сроком, бухгалтерская отчётность и аналоги. Для **нескольких юрлиц** материалы кладите в **`_lena/org-docs/gs-retail/`** или **`_lena/org-docs/finselvat/`**, не смешивая компании. Корень `org-docs` можно использовать только для общих, не привязанных к юрлицу файлов. Создаётся при `workspace-ensure`; список: `drive org-docs-list <root>` (в выборке — и подпапки, и файлы в корне); в `agent-bundle` — **`lena.orgDocsFolderId`** и **`orgDocsFiles`**. Сценарий Лены — в [LENA_RULES.md](LENA_RULES.md) §6b.
 
-**Учредительные документы:** `_lena/founding-docs` — документы, которые **не меняются** (например **свидетельство о регистрации**) или меняются **очень редко** (**устав**, **приказ о назначении директора** и т.п.). Те же правила, что для `org-docs`: один раз запросил загрузку → проверил → внёс в реестр → дальше берёшь из папки. Создаётся при `workspace-ensure`; список: `drive founding-docs-list <root>`; в `agent-bundle` — **`lena.foundingDocsFolderId`** и **`foundingDocsFiles`**. Подробнее — [LENA_RULES.md](LENA_RULES.md) §6c.
+**Учредительные документы:** `_lena/founding-docs` — устав, регистрация, приказ о директоре и т.п. Структура как у `org-docs`: подпапки **`gs-retail`**, **`finselvat`**. Те же правила загрузки и реестра. Создаётся при `workspace-ensure`; список: `drive founding-docs-list <root>`; в `agent-bundle` — **`lena.foundingDocsFolderId`** и **`foundingDocsFiles`**. Подробнее — [LENA_RULES.md](LENA_RULES.md) §6c.
 
 **Тендер:** `workspace-tender` (год по умолчанию или `ГГГГ`, либо `flat`); внутри — `inputs`, `drafts`, `exports`, `attachments`, **`notes`** (в т.ч. **`telegram-managers-log.md`** — контекстный лог переписки с менеджерами по этому тендеру, см. [LENA_RULES.md](LENA_RULES.md) §6e). Копия шаблона: `template-copy` (см. `drive` — `flat`, год или только новое имя).
 
@@ -88,7 +88,7 @@ cd tender-prep
 
 | Команда | Назначение |
 |---------|------------|
-| `drive workspace-ensure <root>` | Создать `_lena/{templates,library,context,org-docs,founding-docs,tenders}` при отсутствии |
+| `drive workspace-ensure <root>` | Создать `_lena/{templates,library,context,org-docs,founding-docs,tenders}` и подпапки компаний **`gs-retail`**, **`finselvat`** в templates / org-docs / founding-docs |
 | `drive workspace-layout <root>` | Показать id папок (без создания) |
 | `drive workspace-tender <root> <tenderId> [ГГГГ\|flat]` | Папка тендера; по умолчанию год в пути; `flat` — без года (legacy) |
 | `drive templates-list <root>` | Список в `_lena/templates` |
