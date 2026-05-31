@@ -74,22 +74,22 @@ if (Test-Path $envFile) {
   Write-Host "Updated .env (Playwright paths)"
 }
 
-$nssm = $null
-foreach ($c in @(
-  (Get-Command nssm -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source),
-  "C:\tools\nssm\nssm.exe"
-)) {
-  if ($c -and (Test-Path $c)) { $nssm = $c; break }
+function Grant-SystemReadFile {
+  param([string]$Path)
+  if ($Path -and (Test-Path $Path)) {
+    icacls $Path /grant "SYSTEM:R" 2>$null | Out-Null
+  }
 }
-if ($nssm -and (Get-Service -Name "tender-prep-lena" -ErrorAction SilentlyContinue)) {
-  $extra = @(
-    "PLAYWRIGHT_BROWSERS_PATH=$BrowsersPath",
-    "LENA_PLAYWRIGHT_BROWSERS_PATH=$BrowsersPath",
-    "LENA_ICETRADE_PLAYWRIGHT=1",
-    "LENA_ICETRADE_PLAYWRIGHT_DOWNLOADS_DIR=$DownloadsPath"
-  ) -join "`n"
-  & $nssm set tender-prep-lena AppEnvironmentExtra $extra 2>$null | Out-Null
-  Write-Host "NSSM AppEnvironmentExtra updated (Playwright for SYSTEM service)"
+
+function Grant-SystemReadTree {
+  param([string]$Path)
+  if ($Path -and (Test-Path $Path)) {
+    icacls $Path /grant "SYSTEM:(OI)(CI)RX" /T 2>$null | Out-Null
+  }
 }
+
+Grant-SystemReadFile -Path $envFile
+Grant-SystemReadTree -Path "C:\secrets\tender-prep"
+Grant-SystemReadTree -Path (Join-Path $RepoRoot ".venv")
 
 exit 0

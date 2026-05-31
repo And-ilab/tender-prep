@@ -49,6 +49,14 @@ if (-not $nssm -or -not (Test-Path $nssm)) {
 
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
+$envFile = Join-Path $RepoRoot ".env"
+if (Test-Path $envFile) {
+  icacls $envFile /grant "SYSTEM:R" 2>$null | Out-Null
+}
+if (Test-Path "C:\secrets\tender-prep") {
+  icacls "C:\secrets\tender-prep" /grant "SYSTEM:(OI)(CI)RX" /T 2>$null | Out-Null
+}
+
 $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($existing) {
   Write-Host "Stopping existing service $ServiceName..."

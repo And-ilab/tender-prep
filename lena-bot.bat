@@ -56,6 +56,9 @@ if errorlevel 1 (
   echo [Внимание] ensure-playwright-server.ps1 — см. вывод выше
 )
 
+echo === Права SYSTEM на .env и секреты ===
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\lena-server\repair-service-permissions.ps1" -RepoRoot "%CD%"
+
 echo === Перезапуск Лены ===
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\lena-server\lena-bot-service-restart.ps1" -RepoRoot "%CD%"
 set "EC=%ERRORLEVEL%"
