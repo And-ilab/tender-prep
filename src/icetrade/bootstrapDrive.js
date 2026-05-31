@@ -10,6 +10,7 @@ import { fetchIceTradeCardHtml, downloadIceTradeBinary, validateAttachmentBuffer
 import {
   fetchIceTradeCardHtmlPlaywright,
   iceTradePlaywrightEnabled,
+  playwrightChromiumLikelyInstalled,
   withPlaywrightIceTradeDownloadBatch,
 } from "./fetchPageRendered.js";
 import { iceTradePythonFetchMode, runPythonIceTradeFetch } from "./bootstrapPythonSidecar.js";
@@ -94,6 +95,28 @@ function guessFileNameFromUrl(url) {
 }
 
 /**
+ * Ожидаемое имя в inputs до HTTP (без Content-Disposition) — для пропуска повторного скачивания.
+ * @param {string} fileUrl
+ * @param {string | undefined} linkText
+ */
+function predictInputFileNameBeforeDownload(fileUrl, linkText) {
+  return resolveDownloadFileName(fileUrl, linkText, null);
+}
+
+/**
+ * Файл с таким именем уже в inputs на Drive и его не нужно качать заново (кроме замены «шумного» маленького PDF).
+ * @param {string} predictedName
+ * @param {{ name?: string; id?: string; size?: string }[]} inputChildren
+ * @param {Set<string>} existing
+ */
+function shouldSkipDownloadExistingOnDrive(predictedName, inputChildren, existing) {
+  if (!existing.has(predictedName)) return false;
+  const existingRow = inputChildren.find((f) => f.name === predictedName);
+  if (!existingRow) return true;
+  return !shouldReplaceSmallPdfOnDrive(existingRow, predictedName);
+}
+
+/**
  * Имя файла: из текста ссылки (как на IceTrade), иначе из URL / Content-Disposition.
  * @param {string} fileUrl
  * @param {string | undefined} linkText
@@ -132,7 +155,11 @@ async function downloadExternalToTemp(url, tmpRoot, timeoutMs, refererPageUrl, l
     Accept: "*/*",
     Referer: downloadRefererForFileUrl(url, refererPageUrl),
   };
-  const { buffer, contentDisposition, contentType } = await downloadIceTradeBinary(url, h, timeoutMs);
+  const fileNameGuess = resolveDownloadFileName(url, linkText, null);
+  const { buffer, contentDisposition, contentType } = await downloadIceTradeBinary(url, h, timeoutMs, {
+    fileNameHint: fileNameGuess,
+    cardPageUrl: refererPageUrl,
+  });
   if (buffer.byteLength > maxBytes) throw new Error(`Файл слишком большой (${buffer.byteLength} байт)`);
 
   const fileName = resolveDownloadFileName(url, linkText, contentDisposition);
@@ -157,12 +184,18 @@ function sleepMs(ms) {
  * @param {string} p.inputsId
  * @param {{ name: string; webViewLink?: string }[]} p.uploaded
  * @param {string[]} p.errors
+ * @param {Set<string>} [p.skippedExistingSet] — уже в inputs, повторно не заливаем (и не считаем ошибкой).
  * @returns {Promise<boolean>} true — загружен новый файл
  */
 async function consumeTempFileToInputs(p) {
-  const { dl, inputChildren, existing, inputsId, uploaded, errors } = p;
+  const { dl, inputChildren, existing, inputsId, uploaded, errors, skippedExistingSet } = p;
   const baseName = dl.fileName;
   const existingRow = inputChildren.find((f) => f.name === baseName);
+  if (existing.has(baseName) && !existingRow) {
+    skippedExistingSet?.add(baseName);
+    await rm(dl.path, { force: true }).catch(() => {});
+    return false;
+  }
   if (existing.has(baseName) && existingRow) {
     if (shouldReplaceSmallPdfOnDrive(existingRow, baseName)) {
       try {
@@ -179,7 +212,7 @@ async function consumeTempFileToInputs(p) {
         return false;
       }
     } else {
-      errors.push(`Уже есть на Drive: ${baseName}`);
+      skippedExistingSet?.add(baseName);
       await rm(dl.path, { force: true }).catch(() => {});
       return false;
     }
@@ -222,7 +255,7 @@ async function downloadExternalToTempWithRetry(url, tmpRoot, timeoutMs, refererP
 }
 
 /**
- * @param {{ viewId: string, pageUrl: string, uploaded: { name: string, webViewLink?: string }[], candidates: { url: string, linkText?: string }[], errors: string[], cardFetchVia?: string, importSnapshot?: unknown, tenderFolderUrl?: string, inputsFolderUrl?: string }} p
+ * @param {{ viewId: string, pageUrl: string, uploaded: { name: string, webViewLink?: string }[], candidates: { url: string, linkText?: string }[], errors: string[], cardFetchVia?: string, importSnapshot?: unknown, tenderFolderUrl?: string, inputsFolderUrl?: string, skippedExistingOnDrive?: string[] }} p
  */
 function buildBootstrapMarkdown(p) {
   const {
@@ -235,6 +268,7 @@ function buildBootstrapMarkdown(p) {
     importSnapshot,
     tenderFolderUrl,
     inputsFolderUrl,
+    skippedExistingOnDrive = [],
   } = p;
   const snap = /** @type {{ name?: string; webViewLink?: string } | null} */ (importSnapshot ?? null);
   return [
@@ -254,6 +288,13 @@ function buildBootstrapMarkdown(p) {
       ? uploaded.map((u) => `- ${u.name}${u.webViewLink ? ` (${u.webViewLink})` : ""}`).join("\n")
       : "- _(автоматически не скачано — положите файлы вручную в inputs)_",
     "",
+    ...(skippedExistingOnDrive.length
+      ? [
+          "## Уже в inputs на Drive (с сайта не качали повторно)",
+          skippedExistingOnDrive.map((name) => `- ${name}`).join("\n"),
+          "",
+        ]
+      : []),
     "## Кандидаты ссылок на странице",
     candidates.length
       ? candidates.map((c) => `- ${c.url}${c.linkText ? ` (${c.linkText})` : ""}`).join("\n")
@@ -335,6 +376,11 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         errors.push(`Playwright (LENA_ICETRADE_PLAYWRIGHT): ${msg} — пробуем обычный HTTP.`);
+        if (/Executable doesn't exist|ms-playwright/i.test(msg)) {
+          errors.push(
+            "Playwright: **Chromium не установлен** для учётной записи процесса (служба Windows → profile SYSTEM). В `.env`: **LENA_PLAYWRIGHT_BROWSERS_PATH=C:\\ProgramData\\ms-playwright**, затем `npx playwright install chromium` с этой переменной (см. **scripts/lena-server/install-windows.ps1**).",
+          );
+        }
         const r = await fetchIceTradeCardHtml(pageUrl, icetradeFetchHeaders(), timeoutMs);
         html = r.html;
         cardFetchVia = r.via;
@@ -418,12 +464,17 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
   }
   let inputChildren = await listChildren(inputsId);
   const existing = new Set(inputChildren.map((f) => f.name));
+  /** @type {Set<string>} */
+  const skippedExistingSet = new Set();
 
   const SNAPSHOT_DRIVE_NAME = "icetrade-import-snapshot.json";
   /** @type {unknown} */
   let importSnapshotUpload = null;
+  /** @type {ReturnType<typeof buildIceTradeImportSnapshot> | null} */
+  let importSnapshotPayload = null;
   try {
     const snap = buildIceTradeImportSnapshot(html || "", { pageUrl, viewId, cardFetchVia });
+    importSnapshotPayload = snap;
     for (const w of snap.warnings ?? []) {
       if (w) errors.push(`Снимок карточки: ${w}`);
     }
@@ -456,18 +507,26 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
   const rawPwDl = process.env.LENA_ICETRADE_PLAYWRIGHT_FILE_DOWNLOAD?.trim().toLowerCase() ?? "";
   const usePwBatchDl =
     iceTradePlaywrightEnabled() &&
-    cardFetchVia === "playwright" &&
+    playwrightChromiumLikelyInstalled() &&
     rawPwDl !== "0" &&
     rawPwDl !== "false" &&
     rawPwDl !== "no" &&
     rawPwDl !== "off";
+  if (iceTradePlaywrightEnabled() && !playwrightChromiumLikelyInstalled() && candidates.length > 0) {
+    errors.push(
+      "Playwright включён, но **Chromium не найден** — скачивание вложений идёт через HTTP/PowerShell (см. **LENA_PLAYWRIGHT_BROWSERS_PATH**). На Windows для getFile пробуется **PowerShell WebSession** (карточка → файл), как в браузере.",
+    );
+  }
 
   let n = 0;
   let usedPlaywrightFileBatch = false;
 
   if (usePwBatchDl && candidates.length > 0) {
     try {
-      await withPlaywrightIceTradeDownloadBatch(timeoutMs, pageUrl, async ({ requestBinary }) => {
+      await withPlaywrightIceTradeDownloadBatch(
+        timeoutMs,
+        pageUrl,
+        async ({ requestBinary }) => {
         for (const item of candidates) {
           const fileUrl = item.url;
           if (n >= maxFiles) {
@@ -475,6 +534,11 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
             break;
           }
           try {
+            const predicted = predictInputFileNameBeforeDownload(fileUrl, item.linkText);
+            if (shouldSkipDownloadExistingOnDrive(predicted, inputChildren, existing)) {
+              skippedExistingSet.add(predicted);
+              continue;
+            }
             if (n > 0 && betweenFiles > 0) await sleepMs(betweenFiles);
             const { buffer, contentType, contentDisposition } = await requestBinary(fileUrl, pageUrl);
             const maxBytes = 45 * 1024 * 1024;
@@ -491,13 +555,16 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
               inputsId,
               uploaded,
               errors,
+              skippedExistingSet,
             });
             if (uploadedOk) n += 1;
           } catch (e) {
             errors.push(`${fileUrl}: ${e instanceof Error ? e.message : String(e)}`);
           }
         }
-      });
+      },
+        { viewId },
+      );
       usedPlaywrightFileBatch = true;
     } catch (e) {
       errors.push(
@@ -514,6 +581,11 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
         break;
       }
       try {
+        const predicted = predictInputFileNameBeforeDownload(fileUrl, item.linkText);
+        if (shouldSkipDownloadExistingOnDrive(predicted, inputChildren, existing)) {
+          skippedExistingSet.add(predicted);
+          continue;
+        }
         if (n > 0 && betweenFiles > 0) await sleepMs(betweenFiles);
         const dl = await downloadExternalToTempWithRetry(fileUrl, tmpRoot, timeoutMs, pageUrl, item.linkText);
         const uploadedOk = await consumeTempFileToInputs({
@@ -523,6 +595,7 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
           inputsId,
           uploaded,
           errors,
+          skippedExistingSet,
         });
         if (uploadedOk) n += 1;
       } catch (e) {
@@ -532,6 +605,7 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
   }
 
   const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  const skippedExistingOnDrive = [...skippedExistingSet].sort((a, b) => a.localeCompare(b));
   const noteName = `icetrade-bootstrap-${viewId}-${stamp}.md`;
   const noteMd = buildBootstrapMarkdown({
     viewId,
@@ -543,6 +617,7 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
     importSnapshot: importSnapshotUpload,
     tenderFolderUrl: tenderRootWebViewLink,
     inputsFolderUrl: inputsFolderWebViewLink,
+    skippedExistingOnDrive,
   });
   const notePath = join(tmpRoot, noteName);
   await writeFile(notePath, noteMd, "utf8");
@@ -573,5 +648,7 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
     importSnapshotFile: importSnapshotUpload,
     iceTradeUrl: pageUrl,
     alternateIdsInMessage: extractIceTradeViewIds(urlOrText).filter((x) => x !== viewId),
+    skippedExistingOnDrive,
+    importSnapshot: importSnapshotPayload,
   };
 }

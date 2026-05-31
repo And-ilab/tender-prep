@@ -222,14 +222,116 @@ async function fetchBinaryFetch(url, headers, timeoutMs) {
 
 /**
  * @param {string} url
- * @param {number} timeoutMs
  */
-async function downloadBinaryPowerShell(url, timeoutMs) {
+function guessBasenameFromUrl(url) {
+  try {
+    const u = new URL(url);
+    const base = u.pathname.split("/").pop() || "download";
+    return decodeURIComponent(base.split("?")[0]) || "download.bin";
+  } catch {
+    return "download.bin";
+  }
+}
+
+/**
+ * Ответ по URL вложения похож на HTML-заглушку, а не на файл (типично getFile без Referer/cookies).
+ * @param {string} url
+ * @param {Buffer} buffer
+ * @param {string | null | undefined} contentType
+ * @param {string} fileNameHint
+ */
+export function attachmentResponseLooksLikeHtmlStub(url, buffer, contentType, fileNameHint) {
+  const v = validateAttachmentBuffer(buffer, fileNameHint, contentType);
+  if (!v.ok) return true;
+  if (contentType?.includes("text/html")) return true;
+  const low = url.toLowerCase();
+  const expectBinary =
+    low.endsWith(".pdf") ||
+    low.includes("/getfile") ||
+    low.includes("getfile") ||
+    /[?&]f=detail\b/i.test(low) ||
+    /\.(docx?|zip|rar|7z|xlsx?)(\?|#|$)/i.test(fileNameHint);
+  if (!expectBinary || !buffer || buffer.length < 8) return false;
+  const sig = buffer.subarray(0, 5).toString("latin1");
+  if (sig.startsWith("%PDF")) return false;
+  const head = buffer
+    .subarray(0, Math.min(500, buffer.length))
+    .toString("utf8")
+    .trimStart()
+    .toLowerCase();
+  return head.startsWith("<") || head.includes("<!doctype") || head.includes("<html");
+}
+/**
+ * @param {Record<string, string>} headers
+ * @returns {{ setup: string, arg: string }}
+ */
+function powershellHeaderBlock(headers) {
+  /** @type {string[]} */
+  const hdrPairs = [];
+  const ua = headers["User-Agent"];
+  const ref = headers.Referer;
+  const cookie = headers.Cookie;
+  const accept = headers.Accept;
+  if (ua) hdrPairs.push(`'User-Agent'='${escapePsSingleQuoted(ua)}'`);
+  if (ref) hdrPairs.push(`'Referer'='${escapePsSingleQuoted(ref)}'`);
+  if (cookie) hdrPairs.push(`'Cookie'='${escapePsSingleQuoted(cookie)}'`);
+  if (accept) hdrPairs.push(`'Accept'='${escapePsSingleQuoted(accept)}'`);
+  if (!hdrPairs.length) return { setup: "", arg: "" };
+  return {
+    setup: `$headers = @{ ${hdrPairs.join("; ")} }; `,
+    arg: " -Headers $headers",
+  };
+}
+
+/**
+ * IceTrade getFile: сначала открыть карточку в WebSession (куки), затем скачать файл — как клик в браузере.
+ * @param {string} fileUrl
+ * @param {string} cardPageUrl
+ * @param {number} timeoutMs
+ * @param {Record<string, string>} headers
+ */
+async function downloadBinaryPowerShellWithCardSession(fileUrl, cardPageUrl, timeoutMs, headers) {
+  const sec = Math.max(1, Math.ceil(timeoutMs / 1000));
+  const dir = await mkdtemp(join(tmpdir(), "lena-ps-sess-"));
+  const outPath = join(dir, "f.bin");
+  const cardHdr = { ...headers };
+  delete cardHdr.Referer;
+  const fileHdr = { ...headers, Referer: headers.Referer || cardPageUrl };
+  const warm = powershellHeaderBlock({
+    ...cardHdr,
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  });
+  const file = powershellHeaderBlock(fileHdr);
+  try {
+    const cmd = [
+      "$ProgressPreference = 'SilentlyContinue';",
+      "$session = New-Object Microsoft.PowerShell.Commands.WebRequestSession;",
+      `${warm.setup}Invoke-WebRequest -Uri '${escapePsSingleQuoted(cardPageUrl)}' -WebSession $session -UseBasicParsing -TimeoutSec ${sec}${warm.arg} | Out-Null;`,
+      `${file.setup}Invoke-WebRequest -Uri '${escapePsSingleQuoted(fileUrl)}' -WebSession $session -OutFile '${escapePsSingleQuoted(outPath)}' -UseBasicParsing -TimeoutSec ${sec}${file.arg};`,
+    ].join(" ");
+    await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", cmd], {
+      maxBuffer: 256 * 1024,
+      windowsHide: true,
+    });
+    const buffer = await readFile(outPath);
+    return { buffer, contentDisposition: null, contentType: null };
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * @param {string} url
+ * @param {number} timeoutMs
+ * @param {Record<string, string>} [headers]
+ */
+async function downloadBinaryPowerShell(url, timeoutMs, headers = {}) {
   const sec = Math.max(1, Math.ceil(timeoutMs / 1000));
   const dir = await mkdtemp(join(tmpdir(), "lena-ps-dl-"));
   const outPath = join(dir, "f.bin");
   try {
-    const cmd = `Invoke-WebRequest -Uri '${escapePsSingleQuoted(url)}' -OutFile '${escapePsSingleQuoted(outPath)}' -UseBasicParsing -TimeoutSec ${sec}`;
+    const { setup: hdrSetup, arg: hdrArg } = powershellHeaderBlock(headers);
+    const cmd = `${hdrSetup}Invoke-WebRequest -Uri '${escapePsSingleQuoted(url)}' -OutFile '${escapePsSingleQuoted(outPath)}' -UseBasicParsing -TimeoutSec ${sec}${hdrArg}`;
     await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", cmd], {
       maxBuffer: 256 * 1024,
       windowsHide: true,
@@ -252,11 +354,12 @@ async function downloadBinaryCurl(url, headers, timeoutMs) {
   const dir = await mkdtemp(join(tmpdir(), "lena-curl-dl-"));
   const outPath = join(dir, "f.bin");
   try {
-    await execFileAsync(
-      "curl",
-      ["-sSL", "--max-time", String(sec), "-A", ua, "-o", outPath, url],
-      { maxBuffer: 256 * 1024 },
-    );
+    /** @type {string[]} */
+    const args = ["-sSL", "--max-time", String(sec), "-A", ua, "-o", outPath];
+    if (headers.Referer) args.push("-H", `Referer: ${headers.Referer}`);
+    if (headers.Cookie) args.push("-H", `Cookie: ${headers.Cookie}`);
+    args.push(url);
+    await execFileAsync("curl", args, { maxBuffer: 256 * 1024 });
     const buffer = await readFile(outPath);
     return { buffer, contentDisposition: null, contentType: null };
   } finally {
@@ -309,18 +412,73 @@ export function validateAttachmentBuffer(buffer, fileName, contentType) {
 }
 
 /**
- * Бинарное скачивание вложения (тот же каскад, что и для HTML).
  * @param {string} url
  * @param {Record<string, string>} headers
  * @param {number} timeoutMs
+ * @param {string} fileNameHint
+ * @param {string | undefined} cardPageUrl — URL карточки IceTrade для WebSession (Windows / getFile)
  * @returns {Promise<{ buffer: Buffer, contentDisposition: string | null, contentType: string | null, via: string }>}
  */
-export async function downloadIceTradeBinary(url, headers, timeoutMs) {
+async function downloadIceTradeBinaryViaBackends(url, headers, timeoutMs, fileNameHint, cardPageUrl) {
+  const low = url.toLowerCase();
+  const isIceGetFile =
+    /icetrade\.by/i.test(url) &&
+    (low.includes("/getfile") || low.includes("getfile") || /[?&]f=detail\b/i.test(low));
+
+  /** @type {{ via: string, run: () => Promise<{ buffer: Buffer, contentDisposition: string | null, contentType: string | null }> }[]} */
+  const chain = [];
+
+  if (process.platform === "win32" && process.env.LENA_ICETRADE_NO_POWERSHELL_FALLBACK !== "1") {
+    if (cardPageUrl && isIceGetFile) {
+      chain.push({
+        via: "powershell:session",
+        run: () => downloadBinaryPowerShellWithCardSession(url, cardPageUrl, timeoutMs, headers),
+      });
+    }
+    chain.push({
+      via: "powershell",
+      run: () => downloadBinaryPowerShell(url, timeoutMs, headers),
+    });
+  }
+
+  chain.push(
+    { via: "fetch", run: () => fetchBinaryFetch(url, headers, timeoutMs) },
+    { via: "node:https", run: () => httpsGetBinary(url, headers, timeoutMs) },
+    { via: "curl", run: () => downloadBinaryCurl(url, headers, timeoutMs) },
+  );
+
+  /** @type {string[]} */
+  const rejects = [];
+  for (const step of chain) {
+    try {
+      const { buffer, contentDisposition, contentType } = await step.run();
+      if (attachmentResponseLooksLikeHtmlStub(url, buffer, contentType, fileNameHint)) {
+        rejects.push(`${step.via}: HTML вместо файла`);
+        continue;
+      }
+      return { buffer, contentDisposition, contentType, via: step.via };
+    } catch (e) {
+      rejects.push(`${step.via}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  throw new Error(rejects.join(" | ") || "download failed");
+}
+
+/**
+ * Бинарное скачивание вложения (каскад бэкендов; при HTML-заглушке пробует следующий, в т.ч. PowerShell на Windows).
+ * @param {string} url
+ * @param {Record<string, string>} headers
+ * @param {number} timeoutMs
+ * @param {{ fileNameHint?: string, cardPageUrl?: string }} [opts]
+ * @returns {Promise<{ buffer: Buffer, contentDisposition: string | null, contentType: string | null, via: string }>}
+ */
+export async function downloadIceTradeBinary(url, headers, timeoutMs, opts = {}) {
   const backend = process.env.LENA_ICETRADE_FETCH_BACKEND?.trim().toLowerCase() ?? "auto";
   const h = { ...headers, Accept: headers.Accept ?? "*/*" };
+  const fileNameHint = opts.fileNameHint ?? guessBasenameFromUrl(url);
 
   if (backend === "powershell") {
-    const { buffer, contentDisposition, contentType } = await downloadBinaryPowerShell(url, timeoutMs);
+    const { buffer, contentDisposition, contentType } = await downloadBinaryPowerShell(url, timeoutMs, h);
     return { buffer, contentDisposition, contentType, via: "powershell" };
   }
   if (backend === "curl") {
@@ -336,26 +494,5 @@ export async function downloadIceTradeBinary(url, headers, timeoutMs) {
     return { buffer, contentDisposition, contentType, via: "fetch" };
   }
 
-  try {
-    const { buffer, contentDisposition, contentType } = await fetchBinaryFetch(url, h, timeoutMs);
-    return { buffer, contentDisposition, contentType, via: "fetch" };
-  } catch {
-    /* try next */
-  }
-  try {
-    const { buffer, contentDisposition, contentType } = await httpsGetBinary(url, h, timeoutMs);
-    return { buffer, contentDisposition, contentType, via: "node:https" };
-  } catch {
-    /* try next */
-  }
-  if (process.platform === "win32" && process.env.LENA_ICETRADE_NO_POWERSHELL_FALLBACK !== "1") {
-    try {
-      const { buffer, contentDisposition, contentType } = await downloadBinaryPowerShell(url, timeoutMs);
-      return { buffer, contentDisposition, contentType, via: "powershell" };
-    } catch {
-      /* try next */
-    }
-  }
-  const { buffer, contentDisposition, contentType } = await downloadBinaryCurl(url, h, timeoutMs);
-  return { buffer, contentDisposition, contentType, via: "curl" };
+  return downloadIceTradeBinaryViaBackends(url, h, timeoutMs, fileNameHint, opts.cardPageUrl);
 }
