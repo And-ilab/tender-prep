@@ -1,5 +1,4 @@
 # Автодеплой на сервер Лены после push в main.
-# Настройка: scripts/lena-server/README.md § «Автодеплой (GitHub Actions)».
 
 name: Deploy Lena server
 
