@@ -26,6 +26,13 @@ import {
 } from "../analysis/pricingPolicy.js";
 import { formatAnalysisMatrixBullets } from "../analysis/analysisMatrixBullets.js";
 import {
+  applyCanonicalNamesToStructured,
+  buildRequiredDocumentsList,
+  formatDocumentCompositionStep1Telegram,
+  isNonResidentOnlyRequirement,
+} from "../analysis/documentChecklist.js";
+import { canonicalTitlesForAnalysisPrompt } from "../analysis/canonicalDocumentTypes.js";
+import {
   buildSnapshotCorpusAugmentation,
   readIceTradeImportSnapshot,
   snapshotBidsDeadlineHint,
@@ -257,12 +264,16 @@ function keepOnlyCorpusGrounded(structured, corpus) {
   if (!strict || !corpus.trim()) {
     return {
       ...structured,
-      lenaCanPrepare: structured.lenaCanPrepare.map(({ name, basis }) => ({ name, basis })),
-      managerMustProvide: structured.managerMustProvide.map(({ name, reason, criteria }) => ({
-        name,
-        reason,
-        criteria,
-      })),
+      lenaCanPrepare: structured.lenaCanPrepare
+        .filter((x) => !isNonResidentOnlyRequirement(x))
+        .map(({ name, basis }) => ({ name, basis })),
+      managerMustProvide: structured.managerMustProvide
+        .filter((x) => !isNonResidentOnlyRequirement(x))
+        .map(({ name, reason, criteria }) => ({
+          name,
+          reason,
+          criteria,
+        })),
     };
   }
 
@@ -286,8 +297,8 @@ function keepOnlyCorpusGrounded(structured, corpus) {
 
   return {
     ...structured,
-    lenaCanPrepare: lenaOk,
-    managerMustProvide: mgrOk,
+    lenaCanPrepare: lenaOk.filter((x) => !isNonResidentOnlyRequirement(x)),
+    managerMustProvide: mgrOk.filter((x) => !isNonResidentOnlyRequirement(x)),
   };
 }
 
@@ -422,7 +433,7 @@ function buildAnalysisMarkdown(viewId, structured, notParsedFiles, ragUsed, used
 }
 
 /**
- * Форматирование для Telegram после analyzeTenderAfterBootstrap.
+ * Краткий вывод для Telegram (legacy-имя; тот же формат, что после «Анализ документов»).
  * @param {Awaited<ReturnType<typeof analyzeTenderAfterBootstrap>>} r
  */
 export function formatIceTradeAnalysisForTelegram(r) {
@@ -432,114 +443,17 @@ export function formatIceTradeAnalysisForTelegram(r) {
   if ("insufficientInputText" in r && r.insufficientInputText) {
     const min = r.minInputCharsRequired ?? 120;
     const got = r.inputTextChars ?? 0;
-    const fc = r.inputsFileCount ?? 0;
-    const rootL = "tenderRootWebViewLink" in r ? r.tenderRootWebViewLink : undefined;
     const inL = "inputsFolderWebViewLink" in r ? r.inputsFolderWebViewLink : undefined;
-    const lines = [
-      "---",
-      "**Анализ по этой закупке не выполнялся**",
-      "",
-      ...(rootL ? [`**Папка тендера (Google Drive):** ${rootL}`] : []),
-      ...(inL ? [`**Документы заказчика (inputs):** ${inL}`] : []),
-      ...(rootL || inL ? [""] : []),
-      `В **inputs** мало **распознанного текста** из документов заказчика (сейчас **~${got}** знаков, нужно **≥${min}** — обычно Google Docs/Sheets или txt/md/csv; PDF/DOC без извлечения не учитываются).`,
-    ];
-    if (fc > 0) {
-      lines.push("", `Файлов в inputs: **${fc}**`);
-      if (r.notParsedFiles.length) {
-        lines.push(
-          `Без авто-текста: ${r.notParsedFiles.slice(0, 10).join(", ")}${r.notParsedFiles.length > 10 ? "…" : ""}`,
-        );
-      }
-    } else {
-      lines.push(
-        "",
-        "Папка **inputs** пустая: IceTrade мог не отдать страницу (**fetch failed**), отдать **укороченный HTML**, или ссылки на файлы видны только после полного рендера в браузере. **Положите комплект вручную** (после настройки Drive для SA — см. ниже).",
-      );
-    }
-    lines.push(
-      "",
-      "_Раньше модель могла выдать «типовые формы» без ваших файлов — это не надёжно; такой вывод теперь **не показывается**._",
-    );
-    return lines.join("\n").trim();
+    return [
+      inL ? `**Документы заказчика:** ${inL}` : "",
+      `Мало текста в inputs (~${got} знаков, нужно ≥${min}).`,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
   }
-  const { structured, notParsedFiles, ragUsed } = r;
-  const rootL = "tenderRootWebViewLink" in r ? r.tenderRootWebViewLink : undefined;
   const inL = "inputsFolderWebViewLink" in r ? r.inputsFolderWebViewLink : undefined;
-  const fromPipeline =
-    "usedParsedPipeline" in r && r.usedParsedPipeline ? " **(корпус после парсинга inputs)**" : "";
-  const ph = "pricingHints" in r && r.pricingHints ? r.pricingHints : null;
-  /** @type {string | undefined} */
-  let pricingLine;
-  if (ph) {
-    if (ph.absurdStatedPrice) {
-      pricingLine =
-        "**Цена для КП:** в тексте встречается подозрительная сумма/заглушка — **только через менеджера** (сумма и НДС).";
-    } else if (ph.reductionProcedure) {
-      pricingLine =
-        "**Цена для КП:** по тексту есть **процедура снижения** — в черновике укажи **только стартовую цену** из документов заказчика (без самовольных скидок).";
-    } else {
-      pricingLine =
-        "**Цена для КП:** процедура снижения **не выявлена** — **запроси у менеджера цену** и **НДС (с/без)** по закупке, не придумывай сумму.";
-    }
-  }
-  const prepLink =
-    "preparationPromptFile" in r &&
-    r.preparationPromptFile &&
-    typeof /** @type {{ webViewLink?: string }} */ (r.preparationPromptFile).webViewLink === "string"
-      ? /** @type {{ webViewLink?: string }} */ (r.preparationPromptFile).webViewLink
-      : undefined;
-  const lines = [
-    "---",
-    "**Результат разбора комплекта**",
-    "",
-    `_Источник: только текст из **inputs** + снимок карточки IceTrade (если он в inputs). Пункты матрицы без дословной опоры в этом тексте отброшены._${fromPipeline}`,
-    "",
-    ...(rootL ? [`**Папка тендера (Google Drive):** ${rootL}`] : []),
-    ...(inL ? [`**Документы заказчика (inputs):** ${inL}`] : []),
-    ...(rootL || inL ? [""] : []),
-    ...(pricingLine ? [pricingLine, ""] : []),
-    "**Компания для черновика КП:** выбрать **ГС Ритейл** или **Финсельват** (кнопки ниже), затем **«Сформировать КП»** или **/tenderkp**.",
-    prepLink
-      ? `**Промпт для модуля Preparation:** **\`${PREPARATION_PROMPT_FILENAME}\`** в **notes** — ${prepLink}`
-      : "**Промпт для модуля Preparation:** не удалось записать файл в **notes** (см. ошибку ниже).",
-    "",
-    "**Дальше:** **«Сформировать КП»** или **/tenderkp** подставляют промпт и корпус; **ссылка на КП** — в следующих сообщениях после генерации.",
-    "",
-    `**Наименование:** ${structured.tenderTitle || "— (уточните по документам)"}`,
-    `**Сумма / бюджет:** ${structured.sumOrBudget || "— (уточните в извещении/ТЗ)"}`,
-    "",
-    `**Способ подачи:** ${structured.submissionMethod || "—"}`,
-    `**Дедлайн (окончание приёма):** ${structured.submissionDeadline || "—"}`,
-    "",
-    structured.submissionOverview
-      ? `**К подаче (суть):** ${structured.submissionOverview}`
-      : "",
-    "",
-    "**Матрица требований** (строки только с дословной цитатой во входном тексте):",
-    formatAnalysisMatrixBullets(structured),
-    "",
-    notParsedFiles.length
-      ? `**Без авто-текста (нужен разбор):** ${notParsedFiles.slice(0, 12).join(", ")}${notParsedFiles.length > 12 ? "…" : ""}`
-      : "",
-    "noteUploadError" in r && r.noteUploadError
-      ? (() => {
-          const msg = String(r.noteUploadError).slice(0, 600);
-          const quotaHint =
-            /storage quota|storageQuota|Service Accounts do not have storage/i.test(msg)
-              ? "\n_Подсказка: перенесите корень Лены на **общий диск (Shared drive)** и добавьте сервисный аккаунт участником — см. docs/GOOGLE_DRIVE.md § «Общие диски»._"
-              : "";
-          return `\n**Заметка на Drive не записана:** ${msg}${quotaHint}`;
-        })()
-      : "",
-    "preparationPromptUploadError" in r && r.preparationPromptUploadError
-      ? `\n**Файл Preparation не записан:** ${String(r.preparationPromptUploadError).slice(0, 600)}`
-      : "",
-    ragUsed
-      ? "\n_В промпт подмешан архив RAG (**LENA_ICETRADE_ANALYZE_USE_RAG**); строки матрицы всё равно только из текста inputs._"
-      : "\n_Архив RAG в этот разбор **не** подмешивался — только **inputs** и снимок карточки. Для поиска по архиву в чате: **/archivesearch** (нужен **LENA_RAG_INDEX_DIR**)._",
-  ].filter(Boolean);
-  return lines.join("\n").trim();
+  const requiredDocuments = buildRequiredDocumentsList(r.structured);
+  return formatDocumentCompositionStep1Telegram(r.structured, requiredDocuments, inL);
 }
 
 /**
@@ -701,8 +615,8 @@ export async function analyzeTenderAfterBootstrap(userRootId, tenderId, opts = {
     "- submissionOverview — 1–4 предложения только как пересказ того, что **прямо сказано** в блоке о составе заявки / подаче; иначе null. Обязательно submissionOverviewQuotes: массив из 1–4 **дословных** цитат из блока (каждая 15+ символов), на которых основан пересказ; если не можешь набрать цитаты — submissionOverview=null и массив пустой.",
     "- submissionMethod — одна строка: **способ подачи** заявки/документов (площадка, лично, ЭП, адрес и т.д.) **только** если явно в блоке; иначе null. submissionMethodEvidence — дословная цитата 15+ символов; иначе submissionMethod=null.",
     "- submissionDeadline — одна строка: **дата/время окончания приёма** заявок (дедлайн), как в блоке; иначе null. submissionDeadlineEvidence — дословная цитата 15+ символов; иначе submissionDeadline=null.",
-    "- lenaCanPrepare[]: только документ/действие, явно следующие из текста заказчика или карточки. У каждого элемента: name, basis (кратко откуда по смыслу), evidence — дословная цитата 15+ символов из блока. Нет цитаты — не включай элемент. Никаких «аналог из RAG».",
-    "- managerMustProvide[]: только если участнику/менеджеру **прямо** требуется внешний документ или данные по тексту блока. evidence — дословная цитата 15+ символов. criteria — только то, что дословно или почти дословно есть в блоке; иначе null (не заполняй «типично для РБ»).",
+    `- lenaCanPrepare[]: только документ/действие, явно следующие из текста заказчика или карточки. Поле name — **максимально близко** к типовым названиям: ${canonicalTitlesForAnalysisPrompt()}. У каждого элемента: name, basis (кратко откуда по смыслу), evidence — дословная цитата 15+ символов из блока. Нет цитаты — не включай элемент. Никаких «аналог из RAG».`,
+    `- managerMustProvide[]: только если участнику/менеджеру **прямо** требуется внешний документ или данные по тексту блока. Поле name — **максимально близко** к типовым названиям (см. выше). evidence — дословная цитата 15+ символов. criteria — только то, что дословно или почти дословно есть в блоке; иначе null (не заполняй «типично для РБ»).`,
     "- **Резидент РБ:** обе наши организации (**ГС Ритейл** и **Финсельват**) — **резиденты Республики Беларусь**. **Не включай** в lenaCanPrepare и managerMustProvide требования, которые по тексту относятся **исключительно** к нерезидентам / иностранным участникам / особым правилам для нерезидентов — для матрицы их **пропускай**. Если в КД даны ветки «резидент / нерезидент», отражай в матрице **только ветку резидента**.",
     "Если фрагментов мало — пустые массивы и nullы нормальны.",
     "Форма ответа (ключи строго):",
@@ -740,7 +654,7 @@ export async function analyzeTenderAfterBootstrap(userRootId, tenderId, opts = {
       { temperature: 0.12, max_tokens: 3500 },
     );
     const parsed = parseLlmJson(rawLlm);
-    structured = applyStrictCorpusGrounding(parsed, corpus);
+    structured = applyCanonicalNamesToStructured(applyStrictCorpusGrounding(parsed, corpus));
   } catch (e) {
     return {
       ok: false,

@@ -7,7 +7,10 @@
 | **1 · Import** | `bootstrapIceTradeToDrive`, `tenders icetrade-bootstrap`, ссылка IceTrade в Telegram | URL/view id, HTML карточки | `inputs/` — вложения заказчика; **`inputs/icetrade-import-snapshot.json`** — снимок полей карточки и **события**; `notes/icetrade-bootstrap-*.md` | в разработке: снимок страницы + события |
 | **2 · Extract** | `extractTenderInputDocumentsToExtracted`, `tenders tender-extract`, `/tenderextract` | файлы в `inputs/` | `inputs/extracted/*.txt`, `extract-manifest.json` | есть; PDF/DOC/DOCX — базово |
 | **3 · Card** | `buildTenderTelegramCard`, `tenders tender-card`, `/tendercard` | `inputs/extracted` + опционально HTML IceTrade | `notes/tender-card-*.md`, сообщение Telegram | есть |
-| **4 · Analyze** | `analyzeTenderAfterBootstrap`, `tenders icetrade-analyze` | текст из inputs (без полного PDF-извлечения в analyze) | `notes/icetrade-analysis-*.md` | есть, устар. под Extract |
+| **4 · Analyze** | `analyzeTenderAfterBootstrap`, кнопка «Анализ документов» в Telegram | текст из inputs | `notes/icetrade-analysis-*.md`; в чат — состав документов → компания → чеклист | есть |
+| **4b · Checklist** | `documentChecklist.js`, `lena-bot.mjs` | результат Analyze | Telegram: Лена / догрузка + ссылки Drive → «Документы загружены» | в разработке |
+| **5 · Commercial terms** | мастер в Telegram, `/tenderprice` | ответы менеджера | `notes/manager-price-quote.md` | есть |
+| **6 · KP** | `runCommercialProposalDraftToDrive`, «Сформировать КП» | компания + условия + Preparation | `drafts/` | есть |
 
 ## Import (детали)
 

@@ -3,12 +3,13 @@
  * В Telegram — по кнопке «Анализ документов» или по slash-команде tenderextract.
  */
 
-import { analyzeTenderAfterBootstrap, formatIceTradeAnalysisForTelegram } from "../icetrade/analyzeAfterBootstrap.js";
+import { analyzeTenderAfterBootstrap } from "../icetrade/analyzeAfterBootstrap.js";
 import { extractTenderInputDocumentsToExtracted } from "../icetrade/inputDocumentsExtract.js";
 import { isLlmConfigured } from "../llm/openaiCompatible.js";
-
-/** Подпись стадии диалога в Telegram: парсинг inputs + при наличии ключа LLM анализ комплекта. */
-const STAGE_PARSING_ANALYSIS_HEADER = "**Parsing+Analysis**\n\n";
+import {
+  buildRequiredDocumentsList,
+  formatDocumentCompositionStep1Telegram,
+} from "../analysis/documentChecklist.js";
 
 /**
  * Сводка результата extract (для Telegram / оркестрации).
@@ -41,28 +42,81 @@ export function formatTenderExtractMarkdown(ex) {
 }
 
 /**
- * Парсинг inputs + при доступном LLM — тот же строгий анализ комплекта, что и после bootstrap (матрица из цитат).
+ * Парсинг inputs + анализ для Telegram-воронки (шаг 1: состав документов).
+ * @param {{ rootId: string, tenderId: string, opts?: { flat?: boolean, year?: string } }} p
+ */
+export async function runTenderInputsExtractForTelegram(p) {
+  const { rootId, tenderId, opts = {} } = p;
+  const ex = await extractTenderInputDocumentsToExtracted(rootId, tenderId, opts);
+  const okN = ex.items.filter((i) => i.chars > 0 && !i.error).length;
+  const failN = ex.items.filter((i) => i.error).length;
+  const extractBrief =
+    failN > 0
+      ? `_Извлечение: с текстом ${okN}/${ex.items.length}, ошибок по файлам: ${failN}._`
+      : null;
+
+  if (!isLlmConfigured()) {
+    return {
+      ok: false,
+      tenderId,
+      opts,
+      extractBrief,
+      error:
+        "Анализ не запускался: задайте **OPENAI_API_KEY** или **LENA_OPENAI_API_KEY**.",
+    };
+  }
+
+  const ar = await analyzeTenderAfterBootstrap(rootId, tenderId, opts);
+  if (!ar.ok) {
+    return {
+      ok: false,
+      tenderId,
+      opts,
+      extractBrief,
+      error: `Анализ не выполнен — ${ar.error ?? "ошибка"}`,
+    };
+  }
+  if ("insufficientInputText" in ar && ar.insufficientInputText) {
+    const min = ar.minInputCharsRequired ?? 120;
+    const got = ar.inputTextChars ?? 0;
+    return {
+      ok: false,
+      tenderId,
+      opts,
+      extractBrief,
+      error: `Мало текста в inputs (~${got} знаков, нужно ≥${min}). Положите комплект или настройте парсинг PDF.`,
+    };
+  }
+
+  const requiredDocuments = buildRequiredDocumentsList(ar.structured);
+  const inputsFolderWebViewLink =
+    "inputsFolderWebViewLink" in ar ? ar.inputsFolderWebViewLink : undefined;
+  const step1Text = formatDocumentCompositionStep1Telegram(
+    ar.structured,
+    requiredDocuments,
+    inputsFolderWebViewLink,
+  );
+  return {
+    ok: true,
+    tenderId,
+    opts,
+    extractBrief,
+    analysis: ar,
+    structured: ar.structured,
+    requiredDocuments,
+    inputsFolderWebViewLink,
+    step1Text,
+  };
+}
+
+/**
+ * @deprecated CLI — полный markdown; в Telegram используйте runTenderInputsExtractForTelegram.
  * @param {{ rootId: string, tenderId: string, opts?: { flat?: boolean, year?: string } }} p
  */
 export async function runTenderInputsExtractMarkdown(p) {
-  const { rootId, tenderId, opts = {} } = p;
-  const ex = await extractTenderInputDocumentsToExtracted(rootId, tenderId, opts);
-  const extractMd = formatTenderExtractMarkdown(ex);
-  if (!isLlmConfigured()) {
-    return [
-      STAGE_PARSING_ANALYSIS_HEADER,
-      extractMd,
-      "",
-      "_**Анализ и матрица требований** не запускались: задайте **OPENAI_API_KEY** или **LENA_OPENAI_API_KEY**._",
-    ].join("\n");
+  const r = await runTenderInputsExtractForTelegram(p);
+  if (!r.ok) {
+    return [r.extractBrief, r.error].filter(Boolean).join("\n\n");
   }
-  const ar = await analyzeTenderAfterBootstrap(rootId, tenderId, opts);
-  const analysisMd = ar.ok
-    ? formatIceTradeAnalysisForTelegram(ar)
-    : [
-        `**Анализ:** не выполнен — ${ar.error ?? "ошибка"}`,
-        "",
-        "_Извлечение текста из файлов прошло; это ошибка **разбора JSON ответа LLM** (модель вернула невалидный JSON). Повторите кнопку или **/tenderextract**._",
-      ].join("\n");
-  return [STAGE_PARSING_ANALYSIS_HEADER, extractMd, "", "---", "", analysisMd].join("\n");
+  return [r.extractBrief, r.step1Text].filter(Boolean).join("\n\n");
 }

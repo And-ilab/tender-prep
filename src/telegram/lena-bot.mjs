@@ -79,7 +79,6 @@ import {
   readPreparationPromptFromNotes,
   replaceManagerPriceQuoteFile,
 } from "../analysis/preparationPromptFromAnalysis.js";
-import { buildTelegramManagerPriceDocHints } from "../analysis/pricingPolicy.js";
 import {
   extractCommercialTermsHintsFromCorpus,
   paymentHintLooksLikeConcreteTerms,
@@ -107,7 +106,8 @@ import {
   telegramIceTradeImportOnlyEnabled,
 } from "../import/iceTradeTelegramImport.js";
 import { OFFER_ORG, runCommercialProposalDraftToDrive } from "../analysis/commercialProposalLlm.js";
-import { runTenderInputsExtractMarkdown } from "../parse/tenderInputsParseFlow.js";
+import { runTenderInputsExtractForTelegram } from "../parse/tenderInputsParseFlow.js";
+import { buildRefinedChecklistTelegramBundle } from "../analysis/documentChecklist.js";
 
 /** Сжатый дефолт для смоук-тестов; полные правила — docs/LENA_RULES.md. Переопределение: LENA_LLM_SYSTEM_PROMPT. */
 const DEFAULT_LLM_SYSTEM = [
@@ -257,14 +257,23 @@ function buildKpOrgInlineKeyboard(token, selected) {
 }
 
 /**
+ * @typedef {"awaiting_org" | "awaiting_manager_docs" | "awaiting_manager_price" | "ready"} TenderFlowPhase
+ */
+
+/**
  * @typedef {Object} ParseOrgPending
  * @property {string} tenderId
  * @property {{ flat?: boolean, year?: string }} opts
  * @property {number} chatId
  * @property {number} ts
  * @property {"gs_retail" | "finselvat" | null} selected
+ * @property {TenderFlowPhase} [phase]
  * @property {"awaiting_manager_price" | "ready"} [kpGatePhase]
  * @property {ManagerPriceWizardState | null} [managerPriceWizard]
+ * @property {import("../analysis/documentChecklist.js").NormalizedDoc[]} [requiredDocuments]
+ * @property {import("../analysis/documentChecklist.js").AnalysisStructured} [analysisStructured]
+ * @property {string} [analysisHintsCorpus]
+ * @property {{ docId: string, title: string, webViewLink: string }[]} [uploadLinks]
  */
 
 /** @type {Map<string, ParseOrgPending>} */
@@ -273,8 +282,25 @@ const parseOrgPending = new Map();
 /** Выбор компании после парсинга: `lena_porg:s:<token>:0|1`; затем **Сформировать КП**: `lena_porg:g:<token>`. */
 const CB_PARSE_ORG_SELECT = "lena_porg:s:";
 const CB_PARSE_ORG_GO = "lena_porg:g:";
+const CB_MGR_DOCS_DONE = "lena_docs:";
 
 const PARSE_ORG_PENDING_TTL_MS = 60 * 60 * 1000;
+
+/** @param {ParseOrgPending} p */
+function tenderFlowPhase(p) {
+  if (p.phase) return p.phase;
+  return p.kpGatePhase === "ready" ? "ready" : "awaiting_manager_price";
+}
+
+/** @param {import("../analysis/documentChecklist.js").AnalysisStructured} structured */
+function structuredToHintsCorpus(structured) {
+  const parts = [
+    structured.submissionOverview,
+    ...structured.lenaCanPrepare.map((x) => `${x.name} ${x.basis}`),
+    ...structured.managerMustProvide.map((x) => `${x.name} ${x.reason}`),
+  ].filter(Boolean);
+  return parts.join("\n");
+}
 
 /** Защита от повторного нажатия «Сформировать КП» в цепочке после парсинга. */
 const parseOrgGoConsumed = new Set();
@@ -300,6 +326,7 @@ function managerPriceGateDisabled() {
 /** @param {KpOrgPending | ParseOrgPending} p */
 function kpGateIsReady(p) {
   if (managerPriceGateDisabled()) return true;
+  if ("phase" in p && p.phase) return tenderFlowPhase(/** @type {ParseOrgPending} */ (p)) === "ready";
   return (p.kpGatePhase ?? "ready") === "ready";
 }
 
@@ -366,14 +393,12 @@ function buildManagerPriceWizardStepBody(tenderId, step, wiz) {
   switch (step) {
     case "price":
       return [
-        `Условия для КП, тендер ${tenderId}. После шагов — выбор компании (ГС Ритейл или Финсельват).`,
-        "",
-        "Ответьте «Ответить» на это сообщение или используйте кнопки, если есть фрагмент из документов.",
-        "",
-        "Шаг 1 — цена. Укажите сумму в валюте закупки (как у заказчика: BYN, USD, EUR и т.д.) и кратко про НДС, если это важно по документам.",
+        `Шаг 1 — цена (тендер ${tenderId}).`,
+        "Ответьте «Ответить»: сумма в валюте закупки и НДС (если нужно).",
         hintBlock,
-        `Одним сообщением без мастера: /tenderprice ${tenderId} … → файл notes/${MANAGER_PRICE_QUOTE_FILENAME}`,
-      ].join("\n");
+      ]
+        .filter(Boolean)
+        .join("\n");
     case "payment": {
       const hasConcretePayDoc = paymentHintLooksLikeConcreteTerms(wiz?.embeddedHints?.payment ?? "");
       return [
@@ -398,7 +423,7 @@ function buildManagerPriceWizardStepBody(tenderId, step, wiz) {
         "Шаг 4 — Гарантийные обязательства.",
         !hasConcreteWarDoc ? noCustomerStarterHint : "",
         hintBlock,
-        "После ответа данные сохранятся на Drive и появятся кнопки выбора организации.",
+        "После ответа — «Сформировать КП».",
       ]
         .filter(Boolean)
         .join("\n");
@@ -415,10 +440,8 @@ function buildManagerPriceWizardStepBody(tenderId, step, wiz) {
  * @param {ManagerPriceWizardState | null | undefined} [wiz]
  */
 function buildManagerPriceWizardFirstMessageText(tenderId, corpus, wiz) {
-  const hints = buildTelegramManagerPriceDocHints(corpus);
-  const hintBlock =
-    hints.length > 0 ? ["Кратко по тексту Analysis (не замена полного комплекта):", "", ...hints, "", "—", ""].join("\n") : "";
-  return hintBlock + buildManagerPriceWizardStepBody(tenderId, "price", wiz);
+  void corpus;
+  return buildManagerPriceWizardStepBody(tenderId, "price", wiz);
 }
 
 /**
@@ -516,26 +539,43 @@ function newParseOrgToken() {
 
 /**
  * @param {string} token
+ */
+function buildOrgSelectKeyboard(token) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "ГС Ритейл", callback_data: `${CB_PARSE_ORG_SELECT}${token}:0` },
+        { text: "Финсельват", callback_data: `${CB_PARSE_ORG_SELECT}${token}:1` },
+      ],
+    ],
+  };
+}
+
+/**
+ * @param {string} token
+ */
+function buildDocsDoneKeyboard(token) {
+  return {
+    inline_keyboard: [[{ text: "Документы загружены", callback_data: `${CB_MGR_DOCS_DONE}${token}` }]],
+  };
+}
+
+/**
+ * @param {string} token
+ */
+function buildParseOrgKpOnlyKeyboard(token) {
+  return {
+    inline_keyboard: [[{ text: "Сформировать КП", callback_data: `${CB_PARSE_ORG_GO}${token}` }]],
+  };
+}
+
+/**
+ * @param {string} token
  * @param {"gs_retail" | "finselvat" | null} selected
  */
 function buildParseOrgInlineKeyboard(token, selected) {
-  /** @type {{ text: string, callback_data: string }[][]} */
-  const rows = [
-    [
-      {
-        text: selected === "gs_retail" ? "✓ ГС Ритейл" : "ГС Ритейл",
-        callback_data: `${CB_PARSE_ORG_SELECT}${token}:0`,
-      },
-      {
-        text: selected === "finselvat" ? "✓ Финсельват" : "Финсельват",
-        callback_data: `${CB_PARSE_ORG_SELECT}${token}:1`,
-      },
-    ],
-  ];
-  if (selected) {
-    rows.push([{ text: "Сформировать КП", callback_data: `${CB_PARSE_ORG_GO}${token}` }]);
-  }
-  return { inline_keyboard: rows };
+  if (selected) return buildParseOrgKpOnlyKeyboard(token);
+  return buildOrgSelectKeyboard(token);
 }
 
 /** Username бота без @ (для упоминаний в группах). */
@@ -1134,15 +1174,19 @@ async function advanceManagerPriceWizard(chatId, chainReplyTo, ref, pending, val
   await replaceManagerPriceQuoteFile(tender.notesId, fileBody);
 
   pending.kpGatePhase = "ready";
+  if ("phase" in pending) pending.phase = "ready";
   pending.managerPriceWizard = null;
   pending.ts = Date.now();
 
   if (ref.flow === "parse") {
-      await sendText(
+    const orgLabel = pending.selected ? OFFER_ORG[pending.selected].label : "";
+    await sendText(
       chatId,
       chainReplyTo,
-      `Условия сохранены → notes/${MANAGER_PRICE_QUOTE_FILENAME}. Выберите компанию и нажмите «Сформировать КП».`,
-      { reply_markup: buildParseOrgInlineKeyboard(token, null) },
+      orgLabel
+        ? `Условия сохранены → notes/${MANAGER_PRICE_QUOTE_FILENAME}. Участник: **${orgLabel}**. Нажмите «Сформировать КП».`
+        : `Условия сохранены → notes/${MANAGER_PRICE_QUOTE_FILENAME}. Нажмите «Сформировать КП».`,
+      { reply_markup: buildParseOrgKpOnlyKeyboard(token) },
     );
   } else {
     await sendText(
@@ -1155,42 +1199,103 @@ async function advanceManagerPriceWizard(chatId, chainReplyTo, ref, pending, val
 }
 
 /**
- * После Analysis: при активном gate сначала запрос цены, затем кнопки организации.
+ * Шаг 1 после Parse+Analysis: состав документов + выбор компании.
  * @param {number} chatId
  * @param {number | undefined} chainReplyTo
- * @param {string} analysisMd
+ * @param {Awaited<ReturnType<typeof runTenderInputsExtractForTelegram>> & { ok: true }} result
  * @param {string} pToken
- * @param {string} tenderId
- * @param {{ flat?: boolean, year?: string }} opts
  */
-async function sendAnalysisResultThenMaybePriceGate(chatId, chainReplyTo, analysisMd, pToken, tenderId, opts) {
+async function sendDocumentChecklistStep1(chatId, chainReplyTo, result, pToken) {
   pruneParseOrgPendingMap();
   const gateOn = !managerPriceGateDisabled();
-  const wizForGate = gateOn ? newManagerPriceWizardState(analysisMd) : null;
+  const hintsCorpus = structuredToHintsCorpus(result.structured);
   parseOrgPending.set(pToken, {
-    tenderId,
-    opts,
+    tenderId: result.tenderId,
+    opts: result.opts,
     chatId,
     ts: Date.now(),
     selected: null,
+    phase: "awaiting_org",
     kpGatePhase: gateOn ? "awaiting_manager_price" : "ready",
-    managerPriceWizard: wizForGate,
+    managerPriceWizard: null,
+    requiredDocuments: result.requiredDocuments,
+    analysisStructured: result.structured,
+    analysisHintsCorpus: hintsCorpus,
+    uploadLinks: [],
   });
 
-  const footerBase = `${analysisMd}\n\nДальше: в Telegram четыре коротких шага (цена → оплата → срок → гарантия), затем выбор компании. Или одним сообщением: /tenderprice ${tenderId} …`;
+  await sendTextChunks(chatId, chainReplyTo, result.step1Text, buildOrgSelectKeyboard(pToken));
+}
 
-  if (!gateOn) {
-    await sendTextChunks(chatId, chainReplyTo, footerBase, buildParseOrgInlineKeyboard(pToken, null));
+/**
+ * @param {number} chatId
+ * @param {number | undefined} chainReplyTo
+ * @param {ParseOrgPending} pending
+ * @param {string} token
+ */
+async function sendRefinedChecklistAfterOrgSelect(chatId, chainReplyTo, pending, token) {
+  if (!pending.selected || !pending.analysisStructured || !pending.requiredDocuments) {
+    await sendText(chatId, chainReplyTo, "Нет данных анализа — запустите «Анализ документов» снова.");
+    return;
+  }
+  assertCredentialsFile();
+  const orgLabel = OFFER_ORG[pending.selected].label;
+  const bundle = await buildRefinedChecklistTelegramBundle(
+    rootId,
+    pending.tenderId,
+    pending.selected,
+    orgLabel,
+    pending.analysisStructured,
+    pending.requiredDocuments,
+    pending.opts,
+  );
+  pending.uploadLinks = bundle.uploadTargets;
+  pending.phase = "awaiting_manager_docs";
+  pending.ts = Date.now();
+
+  const gateOn = !managerPriceGateDisabled();
+  if (!gateOn && bundle.uploadTargets.length === 0) {
+    await sendTextChunks(chatId, chainReplyTo, bundle.text, buildDocsDoneKeyboard(token));
+    await handleManagerDocsDone(chatId, chainReplyTo, token, pending);
     return;
   }
 
-  const lastMid = await sendTextChunks(chatId, chainReplyTo, footerBase, undefined);
-  const gateText = buildManagerPriceWizardFirstMessageText(tenderId, analysisMd, wizForGate);
-  const gateKb = buildManagerPriceWizardStarterKeyboard(pToken, "price", wizForGate);
-  const gateMid = await sendText(chatId, lastMid ?? chainReplyTo, gateText, gateKb ? { reply_markup: gateKb } : undefined);
-  const pend = parseOrgPending.get(pToken);
-  if (pend && typeof gateMid === "number") {
-    registerManagerPriceAnchor(chatId, gateMid, { flow: "parse", token: pToken });
+  await sendTextChunks(chatId, chainReplyTo, bundle.text, buildDocsDoneKeyboard(token));
+}
+
+/**
+ * @param {number} chatId
+ * @param {number | undefined} chainReplyTo
+ * @param {string} token
+ * @param {ParseOrgPending} pending
+ */
+async function handleManagerDocsDone(chatId, chainReplyTo, token, pending) {
+  const gateOn = !managerPriceGateDisabled();
+  pending.phase = gateOn ? "awaiting_manager_price" : "ready";
+  pending.kpGatePhase = gateOn ? "awaiting_manager_price" : "ready";
+  pending.ts = Date.now();
+
+  if (!gateOn) {
+    const orgLabel = pending.selected ? OFFER_ORG[pending.selected].label : "";
+    await sendText(
+      chatId,
+      chainReplyTo,
+      orgLabel
+        ? `Участник: **${orgLabel}**. Нажмите «Сформировать КП».`
+        : "Нажмите «Сформировать КП».",
+      { reply_markup: buildParseOrgKpOnlyKeyboard(token) },
+    );
+    return;
+  }
+
+  const corpus = pending.analysisHintsCorpus ?? "";
+  const wiz = newManagerPriceWizardState(corpus);
+  pending.managerPriceWizard = wiz;
+  const gateText = buildManagerPriceWizardFirstMessageText(pending.tenderId, corpus, wiz);
+  const gateKb = buildManagerPriceWizardStarterKeyboard(token, "price", wiz);
+  const gateMid = await sendText(chatId, chainReplyTo, gateText, gateKb ? { reply_markup: gateKb } : undefined);
+  if (typeof gateMid === "number") {
+    registerManagerPriceAnchor(chatId, gateMid, { flow: "parse", token });
   }
 }
 
@@ -1305,14 +1410,18 @@ async function cmdTenderPrice(chatId, replyTo, rest) {
     const p = parseOrgPending.get(pTok);
     if (p) {
       p.kpGatePhase = "ready";
+      p.phase = "ready";
       p.managerPriceWizard = null;
       p.ts = Date.now();
     }
+    const orgLabel = p?.selected ? OFFER_ORG[p.selected].label : "";
     await sendText(
       chatId,
       replyTo,
-      `Условия сохранены (/tenderprice). Выберите компанию и «Сформировать КП».`,
-      { reply_markup: buildParseOrgInlineKeyboard(pTok, null) },
+      orgLabel
+        ? `Условия сохранены (/tenderprice). Участник: **${orgLabel}**. «Сформировать КП».`
+        : `Условия сохранены (/tenderprice). «Сформировать КП».`,
+      { reply_markup: buildParseOrgKpOnlyKeyboard(pTok) },
     );
     notified = true;
   }
@@ -1597,6 +1706,39 @@ async function handleCallbackQuery(cq) {
     return;
   }
 
+  if (data.startsWith(CB_MGR_DOCS_DONE)) {
+    const token = data.slice(CB_MGR_DOCS_DONE.length).trim();
+    pruneParseOrgPendingMap();
+    const pending = parseOrgPending.get(token);
+    if (!pending || pending.chatId !== chatId) {
+      await answerCallbackQuery(id, "Сообщение устарело.", true);
+      return;
+    }
+    if (tenderFlowPhase(pending) !== "awaiting_manager_docs") {
+      await answerCallbackQuery(id, "Уже обработано или устарело.", true);
+      return;
+    }
+    if (!pending.selected) {
+      await answerCallbackQuery(id, "Сначала выберите компанию.", true);
+      return;
+    }
+    await answerCallbackQuery(id, "Переходим к условиям…");
+    try {
+      /** @type {Record<string, unknown>} */
+      const rmBody = {
+        chat_id: chatId,
+        message_id: msgId,
+        reply_markup: { inline_keyboard: [] },
+      };
+      if (typeof outboundMessageThreadId === "number") rmBody.message_thread_id = outboundMessageThreadId;
+      await tgJson("editMessageReplyMarkup", rmBody);
+    } catch {
+      /* ignore */
+    }
+    await handleManagerDocsDone(chatId, msgId, token, pending);
+    return;
+  }
+
   if (data.startsWith(CB_PARSE_ORG_SELECT)) {
     const rest = data.slice(CB_PARSE_ORG_SELECT.length);
     const lastColon = rest.lastIndexOf(":");
@@ -1617,16 +1759,39 @@ async function handleCallbackQuery(cq) {
       await answerCallbackQuery(id, "Сообщение устарело.", true);
       return;
     }
+    if (orgIdx !== 0 && orgIdx !== 1) {
+      await answerCallbackQuery(id).catch(() => {});
+      return;
+    }
+
+    const phase = tenderFlowPhase(pending);
+    if (phase === "awaiting_org") {
+      pending.selected = orgIdx === 0 ? "gs_retail" : "finselvat";
+      pending.ts = Date.now();
+      const label = OFFER_ORG[pending.selected].label;
+      await answerCallbackQuery(id, `Выбрано: ${label}`);
+      try {
+        /** @type {Record<string, unknown>} */
+        const rmBody = {
+          chat_id: chatId,
+          message_id: msgId,
+          reply_markup: { inline_keyboard: [] },
+        };
+        if (typeof outboundMessageThreadId === "number") rmBody.message_thread_id = outboundMessageThreadId;
+        await tgJson("editMessageReplyMarkup", rmBody);
+      } catch {
+        /* ignore */
+      }
+      await sendRefinedChecklistAfterOrgSelect(chatId, msgId, pending, token);
+      return;
+    }
+
     if (!kpGateIsReady(pending)) {
       await answerCallbackQuery(
         id,
-        "Сначала завершите мастер условий (4 ответа Лене) или /tenderprice …",
+        "Сначала завершите мастер условий (4 ответа) или /tenderprice …",
         true,
       );
-      return;
-    }
-    if (orgIdx !== 0 && orgIdx !== 1) {
-      await answerCallbackQuery(id).catch(() => {});
       return;
     }
     pending.selected = orgIdx === 0 ? "gs_retail" : "finselvat";
@@ -1638,7 +1803,7 @@ async function handleCallbackQuery(cq) {
       const rmBody = {
         chat_id: chatId,
         message_id: msgId,
-        reply_markup: buildParseOrgInlineKeyboard(token, pending.selected),
+        reply_markup: buildParseOrgKpOnlyKeyboard(token),
       };
       if (typeof outboundMessageThreadId === "number") rmBody.message_thread_id = outboundMessageThreadId;
       await tgJson("editMessageReplyMarkup", rmBody);
@@ -1786,9 +1951,17 @@ async function handleCallbackQuery(cq) {
     const stopPulse = startChatActionPulse(chatId, chatActionForParsePipeline());
     try {
       assertCredentialsFile();
-      const md = await runTenderInputsExtractMarkdown({ rootId, tenderId, opts: {} });
+      const extractResult = await runTenderInputsExtractForTelegram({ rootId, tenderId, opts: {} });
       const pToken = newParseOrgToken();
-      await sendAnalysisResultThenMaybePriceGate(chatId, replyTo, md, pToken, tenderId, {});
+      if (!extractResult.ok) {
+        await sendTextChunks(
+          chatId,
+          replyTo,
+          [extractResult.extractBrief, extractResult.error].filter(Boolean).join("\n\n"),
+        );
+      } else {
+        await sendDocumentChecklistStep1(chatId, replyTo, extractResult, pToken);
+      }
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e);
       await sendText(chatId, replyTo, `Парсинг: ошибка — ${err.slice(0, 3500)}`);
@@ -1991,16 +2164,24 @@ async function cmdTenderExtract(chatId, replyTo, args) {
     return;
   }
   assertCredentialsFile();
-  const statusMid = await sendText(chatId, replyTo, `Парсинг **${parsed.tenderId}**: сканирую **inputs/** …`);
+  const statusMid = await sendText(chatId, replyTo, `Анализ **${parsed.tenderId}**…`);
   const stopPulse = startChatActionPulse(chatId, chatActionForParsePipeline());
   try {
-    const md = await runTenderInputsExtractMarkdown({
+    const extractResult = await runTenderInputsExtractForTelegram({
       rootId,
       tenderId: parsed.tenderId,
       opts: parsed.opts,
     });
     const pToken = newParseOrgToken();
-    await sendAnalysisResultThenMaybePriceGate(chatId, statusMid ?? replyTo, md, pToken, parsed.tenderId, parsed.opts);
+    if (!extractResult.ok) {
+      await sendTextChunks(
+        chatId,
+        statusMid ?? replyTo,
+        [extractResult.extractBrief, extractResult.error].filter(Boolean).join("\n\n"),
+      );
+    } else {
+      await sendDocumentChecklistStep1(chatId, statusMid ?? replyTo, extractResult, pToken);
+    }
   } catch (e) {
     const err = e instanceof Error ? e.message : String(e);
     await sendText(chatId, statusMid ?? replyTo, `Парсинг: ошибка — ${err.slice(0, 3500)}`);
@@ -2018,7 +2199,7 @@ async function cmdTenderKp(chatId, replyTo, args) {
       [
         "Использование: /tenderkp <tender_id> [ГГГГ|flat]",
         "Нужен **парсинг** **inputs/** (**/tenderextract**) — в корне тендера должен быть **tender-pipeline-state.json**.",
-        "После Analysis сначала пройдите **мастер условий** в Telegram (цена → оплата → срок → гарантия) или **/tenderprice**, затем выберите компанию (**ГС Ритейл** / **Финсельват**) и **Сформировать КП**. Черновик: **Google Doc** по шаблону (если настроен) + опционально Markdown в **drafts/**.",
+        "После **«Анализ документов»**: состав по КД → компания (**ГС Ритейл** / **Финсельват**) → чеклист и догрузка → **«Документы загружены»** → мастер условий (или **/tenderprice**) → **Сформировать КП**.",
       ].join("\n"),
     );
     return;
@@ -2154,7 +2335,7 @@ async function cmdHelp(chatId, replyTo) {
       "/archivesearch (или /searcharchive) … [число] — поиск по локальному RAG-архиву (фрагменты + пути; см. LENA_RAG_INDEX_DIR и эмбеддинги).",
       "/archiveask (или /askarchive) … [число] — тот же поиск + ответ LLM по найденным отрывкам (нужен ключ LLM и сервер эмбеддингов).",
       "/tenderask <tender_id> [ГГГГ|flat] …вопрос — бандл с явным tender_id + вопрос модели",
-      "/tenderextract <tender_id> [ГГГГ|flat] — парсинг **inputs/**; при ключе LLM — **анализ** и **матрица**; затем в Telegram — **мастер условий** (4 шага) или **/tenderprice**, потом выбор компании",
+      "/tenderextract <tender_id> [ГГГГ|flat] — парсинг **inputs/** и **анализ**; в Telegram — состав документов → компания → догрузка → условия → КП",
       "/tenderprice <tender_id> [ГГГГ|flat] <текст> — сохранить условия в **notes/** одним сообщением (обход мастера; сумма **с НДС 20 %**)",
       "/tendercard <tender_id> [ГГГГ|flat] — карточка: текст из **inputs/** или **inputs/extracted** + HTML IceTrade + LLM",
       "/tenderkp <tender_id> [ГГГГ|flat] — КП (LLM): при необходимости мастер **цена → оплата → срок → гарантия** или **/tenderprice**; затем **ГС Ритейл** / **Финсельват** → **Сформировать КП** → **Google Doc** + Markdown в **drafts/** (**сначала** /tenderextract)",
@@ -2526,6 +2707,7 @@ async function main() {
 
   const un = rawUsername ?? "?";
   console.error(`tender-prep v${tenderPrepVersion()}`);
+  console.error("Telegram: minimal analysis checklist (documentChecklist step1)");
   console.error(`Лена-бот: @${un}, корень Drive: ${rootId}`);
   const rd = resolvedRagIndexDir();
   if (rd) {

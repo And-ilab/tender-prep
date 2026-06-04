@@ -3,10 +3,6 @@
  * Вызывается из Telegram-бота; тот же API пригоден оркестрации (CLI, воркфлоу) без привязки к чату.
  */
 
-import {
-  analyzeTenderAfterBootstrap,
-  formatIceTradeAnalysisForTelegram,
-} from "../icetrade/analyzeAfterBootstrap.js";
 import { bootstrapIceTradeToDrive } from "../icetrade/bootstrapDrive.js";
 import {
   iceTradeCustomerValueIsDocReference,
@@ -276,22 +272,16 @@ export async function runIceTradeImportForMarkdown(opts) {
   const errBrief = formatIceTradeErrorsBriefForUser(r.errors);
 
   let analysisTail = "";
-  if (!importOnly && icetradeAnalyzeEnabled(env)) {
-    if (isLlmConfigured()) {
-      try {
-        const ar = await analyzeTenderAfterBootstrap(rootId, r.viewId, {});
-        analysisTail = `\n\n${formatIceTradeAnalysisForTelegram(ar)}`;
-      } catch (ae) {
-        const am = ae instanceof Error ? ae.message : String(ae);
-        analysisTail = `\n\n**Анализ комплекта:** ошибка — ${am.slice(0, 800)}`;
-      }
-    } else {
-      analysisTail =
-        "\n\n_(Анализ комплекта по inputs не запущен: задайте OPENAI_API_KEY или LENA_OPENAI_API_KEY.)_";
+  if (!importOnly) {
+    analysisTail =
+      "\n\nНажмите **«Анализ документов»** — разбор комплекта, список документов по КД и дальше по воронке.";
+    if (!isLlmConfigured()) {
+      analysisTail +=
+        "\n_(Для анализа задайте **OPENAI_API_KEY** или **LENA_OPENAI_API_KEY**.)_";
     }
   }
-  if (!importOnly && driveSaQuota && r.uploaded.length === 0 && icetradeAnalyzeEnabled(env)) {
-    analysisTail += `\n\n_Блок «анализ» выше опирается на **inputs** на Drive; пока **403 SA**, там пусто — после **Shared drive** пришлите ссылку снова._`;
+  if (!importOnly && driveSaQuota && r.uploaded.length === 0) {
+    analysisTail += `\n\n_Пока **403 SA** на Drive, **inputs** могут быть пусты — после **Shared drive** пришлите ссылку снова._`;
   }
 
   let cardTail = "";
