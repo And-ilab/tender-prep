@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
-import { appendFile, readFile, readdir, writeFile, rm, unlink, realpath } from "node:fs/promises";
+import { readFile, readdir, writeFile, rm, unlink, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -7,22 +7,6 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { tenderFolderName } from "../drive/layoutConstants.js";
 import { detectAttachmentBufferKind } from "./fetchPage.js";
 import { normalizeIceTradeViewId } from "./viewIds.js";
-
-// #region agent log
-/** @param {Record<string, unknown>} data */
-function _dbgClickFlowFail(data) {
-  const payload = {
-    sessionId: "1b4c7e",
-    runId: "post-fix-v2",
-    location: "fetchPageRendered.js:tryIceTradeGetFileViaCardClick",
-    message: "click flow returned null",
-    data,
-    timestamp: Date.now(),
-    hypothesisId: "H11",
-  };
-  appendFile(join(process.cwd(), "debug-1b4c7e.log"), `${JSON.stringify(payload)}\n`).catch(() => {});
-}
-// #endregion
 
 /**
  * Из текста JSON/HTML ответа — URL файлов: icetrade.by (по расширению) и goszakupki.by /auction/get-file/.
@@ -841,9 +825,6 @@ async function tryIceTradeGetFileViaCardClick(context, timeoutMs, fileUrl, iceCa
       }
     }
 
-    // #region agent log
-    _dbgClickFlowFail({ viewId, nParam, fileUrl, tableLinkFilename, modalLinkFilename });
-    // #endregion
     return null;
   } finally {
     await pg.close();

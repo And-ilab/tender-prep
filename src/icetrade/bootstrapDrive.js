@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile, appendFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -19,29 +19,6 @@ import { extractAttachmentCandidates, enrichAttachmentCandidatesLinkText, isIceT
 import { buildIceTradeImportSnapshot, importSnapshotToJson } from "./importPageMeta.js";
 
 const VIEW_PAGE = (/** @type {string} */ id) => `https://icetrade.by/tenders/all/view/${id}`;
-
-// #region agent log
-/** @param {string} location @param {string} message @param {Record<string, unknown>} data @param {string} hypothesisId */
-function _dbgAgentLog(location, message, data, hypothesisId) {
-  const payload = {
-    sessionId: "1b4c7e",
-    runId: "post-fix",
-    location,
-    message,
-    data,
-    timestamp: Date.now(),
-    hypothesisId,
-  };
-  fetch("http://127.0.0.1:7273/ingest/0fbf9c34-aa58-4c41-8b66-36b66355e6e0", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "1b4c7e" },
-    body: JSON.stringify(payload),
-  }).catch(() => {});
-  const line = `${JSON.stringify(payload)}\n`;
-  appendFile(join(process.cwd(), "debug-1b4c7e.log"), line).catch(() => {});
-  appendFile(join(process.cwd(), "logs", "icetrade-bootstrap-debug.ndjson"), line).catch(() => {});
-}
-// #endregion
 
 /**
  * Комплект на карточке IceTrade может вести и на файлы самой ЭТП (icetrade.by), и на выдачу с **goszakupki.by** (напр. /auction/get-file/…).
@@ -492,25 +469,6 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
       `**Playwright / сеть (Node):** накоплено **${networkFileUrls.length}** URL из XHR; кандидатов к скачиванию после фильтра — **${candidates.length}**.`,
     );
   }
-  // #region agent log
-  _dbgAgentLog(
-    "bootstrapDrive.js:candidates",
-    "attachment candidates ready",
-    {
-      viewId,
-      candidatesCount: candidates.length,
-      cardFetchVia: cardFetchVia ?? null,
-      networkFileUrlsCount: networkFileUrls.length,
-      candidateDetails: candidates.map((c) => ({
-        url: c.url,
-        linkText: c.linkText ?? null,
-        predictedName: predictInputFileNameBeforeDownload(c.url, c.linkText),
-        extFromLink: c.linkText?.match(/\.(pdf|docx?|zip|rar)/i)?.[0] ?? null,
-      })),
-    },
-    "H1",
-  );
-  // #endregion
   let inputChildren = await listChildren(inputsId);
   const existing = new Set(inputChildren.map((f) => f.name));
   /** @type {Set<string>} */
@@ -568,26 +526,6 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
 
   let n = 0;
 
-  // #region agent log
-  _dbgAgentLog(
-    "bootstrapDrive.js:download-plan",
-    "download backends selected",
-    {
-      viewId,
-      usePwBatchDl,
-      playwrightEnabled: iceTradePlaywrightEnabled(),
-      chromiumLikelyInstalled: playwrightChromiumLikelyInstalled(),
-      platform: process.platform,
-      cwd: process.cwd(),
-      playwrightBrowsersPath: process.env.PLAYWRIGHT_BROWSERS_PATH?.trim() ?? null,
-      playwrightStorageSet: Boolean(process.env.LENA_ICETRADE_PLAYWRIGHT_STORAGE?.trim()),
-      candidatesCount: candidates.length,
-      existingInputsCount: existing.size,
-    },
-    "H2",
-  );
-  // #endregion
-
   if (usePwBatchDl && candidates.length > 0) {
     const uploadedBeforePwBatch = uploaded.length;
     try {
@@ -615,21 +553,6 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
             baseName = correctAttachmentFileNameFromBuffer(buffer, baseName, item.linkText);
             const v = validateAttachmentBuffer(buffer, baseName, contentType, fileUrl);
             if (!v.ok) {
-              // #region agent log
-              _dbgAgentLog(
-                "bootstrapDrive.js:pw-validate-fail",
-                "playwright download rejected by validateAttachmentBuffer",
-                {
-                  viewId,
-                  fileUrl,
-                  baseName,
-                  contentType,
-                  reason: v.reason,
-                  bufferKind: buffer.subarray(0, 4).toString("hex"),
-                },
-                "H11",
-              );
-              // #endregion
               throw new Error(v.reason);
             }
             const dlPath = join(tmpRoot, `pw-${Date.now()}-${baseName}`);
@@ -657,32 +580,7 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
           "Playwright batch: **0** вложений загружено — пробуем PowerShell WebSession и HTTP по одному файлу.",
         );
       }
-      // #region agent log
-      _dbgAgentLog(
-        "bootstrapDrive.js:pw-batch-done",
-        "playwright batch finished without throw",
-        {
-          viewId,
-          uploadedBeforePwBatch,
-          uploadedAfterPwBatch: uploaded.length,
-          uploadedDelta: pwUploadedDelta,
-          nAfterPwBatch: n,
-        },
-        "H1",
-      );
-      // #endregion
     } catch (e) {
-      // #region agent log
-      _dbgAgentLog(
-        "bootstrapDrive.js:pw-batch-error",
-        "playwright batch threw",
-        {
-          viewId,
-          error: e instanceof Error ? e.message : String(e),
-        },
-        "H2",
-      );
-      // #endregion
       errors.push(
         `Скачивание вложений через Playwright: ${e instanceof Error ? e.message : String(e)} — повтор PowerShell / HTTP.`,
       );
@@ -712,18 +610,6 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
       batchById.set(id, item);
     }
     if (batchItems.length > 0) {
-      // #region agent log
-      _dbgAgentLog(
-        "bootstrapDrive.js:ps-batch-start",
-        "powershell batch starting",
-        {
-          viewId,
-          batchItemsCount: batchItems.length,
-          batchPredictedNames: batchItems.map((b) => b.fileName),
-        },
-        "H4",
-      );
-      // #endregion
       try {
         const d = await mkdtemp(join(tmpRoot, "ps-batch-"));
         const h = icetradeFetchHeaders();
@@ -773,33 +659,8 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
         if (okCnt > 0) {
           errors.push(`**PowerShell batch (WebSession):** загружено **${okCnt}** из **${batchItems.length}** вложений.`);
         }
-        // #region agent log
-        _dbgAgentLog(
-          "bootstrapDrive.js:ps-batch-done",
-          "powershell batch finished",
-          {
-            viewId,
-            okCnt,
-            batchItemsCount: batchItems.length,
-            resultsCount: results.length,
-            psErrors: results.filter((r) => !r.ok).slice(0, 3).map((r) => r.error ?? "err"),
-          },
-          "H4",
-        );
-        // #endregion
         await rm(d, { recursive: true, force: true }).catch(() => {});
       } catch (e) {
-        // #region agent log
-        _dbgAgentLog(
-          "bootstrapDrive.js:ps-batch-error",
-          "powershell batch threw",
-          {
-            viewId,
-            error: e instanceof Error ? e.message : String(e),
-          },
-          "H4",
-        );
-        // #endregion
         errors.push(
           `PowerShell batch (WebSession): ${e instanceof Error ? e.message : String(e)} — пробуем по одному файлу.`,
         );
@@ -832,22 +693,7 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
       });
       if (uploadedOk) n += 1;
     } catch (e) {
-      const errMsg = e instanceof Error ? e.message : String(e);
-      errors.push(`${fileUrl}: ${errMsg}`);
-      // #region agent log
-      _dbgAgentLog(
-        "bootstrapDrive.js:http-fail",
-        "per-file HTTP download failed",
-        {
-          viewId,
-          fileUrl,
-          linkText: item.linkText ?? null,
-          predicted: predictInputFileNameBeforeDownload(fileUrl, item.linkText),
-          error: errMsg.slice(0, 300),
-        },
-        "H3",
-      );
-      // #endregion
+      errors.push(`${fileUrl}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -878,23 +724,6 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
   }
 
   await rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
-
-  // #region agent log
-  _dbgAgentLog(
-    "bootstrapDrive.js:final",
-    "bootstrap complete",
-    {
-      viewId,
-      uploadedCount: uploaded.length,
-      uploadedNames: uploaded.map((u) => u.name),
-      candidatesCount: candidates.length,
-      skippedExistingCount: skippedExistingOnDrive.length,
-      errorsCount: errors.length,
-      errorSamples: errors.slice(0, 5).map((e) => String(e).slice(0, 200)),
-    },
-    "H5",
-  );
-  // #endregion
 
   return {
     viewId,
