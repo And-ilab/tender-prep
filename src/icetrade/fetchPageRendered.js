@@ -1,11 +1,28 @@
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
-import { readFile, readdir, writeFile, rm, unlink, realpath } from "node:fs/promises";
+import { appendFile, readFile, readdir, writeFile, rm, unlink, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { tenderFolderName } from "../drive/layoutConstants.js";
+import { detectAttachmentBufferKind } from "./fetchPage.js";
 import { normalizeIceTradeViewId } from "./viewIds.js";
+
+// #region agent log
+/** @param {Record<string, unknown>} data */
+function _dbgClickFlowFail(data) {
+  const payload = {
+    sessionId: "1b4c7e",
+    runId: "post-fix-v2",
+    location: "fetchPageRendered.js:tryIceTradeGetFileViaCardClick",
+    message: "click flow returned null",
+    data,
+    timestamp: Date.now(),
+    hypothesisId: "H11",
+  };
+  appendFile(join(process.cwd(), "debug-1b4c7e.log"), `${JSON.stringify(payload)}\n`).catch(() => {});
+}
+// #endregion
 
 /**
  * Из текста JSON/HTML ответа — URL файлов: icetrade.by (по расширению) и goszakupki.by /auction/get-file/.
@@ -514,7 +531,7 @@ export async function resolveIceTradeModalPdfLink(pg, viewId, nParam) {
     if ((await byHref.count()) > 0) return byHref;
     const anyGet = scope.locator(`a[href*="getFile"]`).first();
     if ((await anyGet.count()) > 0) return anyGet;
-    const byName = scope.getByRole("link", { name: /\.pdf/i }).first();
+    const byName = scope.getByRole("link", { name: /\.(pdf|docx?)/i }).first();
     if ((await byName.count()) > 0) return byName;
     return null;
   };
@@ -541,10 +558,10 @@ export async function resolveIceTradeModalPdfLink(pg, viewId, nParam) {
     }
   }
 
-  const pdfLinks = pg.getByRole("link", { name: /\.pdf/i });
-  const nLinks = await pdfLinks.count();
+  const fileLinks = pg.getByRole("link", { name: /\.(pdf|docx?)/i });
+  const nLinks = await fileLinks.count();
   for (let i = nLinks - 1; i >= 0; i--) {
-    const cand = pdfLinks.nth(i);
+    const cand = fileLinks.nth(i);
     if (!(await cand.isVisible().catch(() => false))) continue;
     const href = await cand.getAttribute("href").catch(() => null);
     if (href && (href.includes(hrefNeedle) || href.includes(encodeURIComponent(`n=${nParam}`)))) return cand;
@@ -561,7 +578,7 @@ export async function resolveIceTradeModalPdfLink(pg, viewId, nParam) {
     .catch(() => false);
   if (modalLikelyOpen) {
     for (let i = nLinks - 1; i >= 0; i--) {
-      const cand = pdfLinks.nth(i);
+      const cand = fileLinks.nth(i);
       if (await cand.isVisible().catch(() => false)) return cand;
     }
   }
@@ -680,10 +697,19 @@ async function tryIceTradeGetFileViaCardClick(context, timeoutMs, fileUrl, iceCa
       if (!matchesGetFileSameLot(r)) return false;
       const ct = (r.headers()["content-type"] || "").toLowerCase();
       if (ct.includes("text/html")) return false;
-      if (ct.includes("application/pdf")) return true;
+      if (
+        ct.includes("application/pdf") ||
+        ct.includes("msword") ||
+        ct.includes("wordprocessingml") ||
+        ct.includes("spreadsheetml") ||
+        ct.includes("ms-excel")
+      ) {
+        return true;
+      }
       try {
         const b = Buffer.from(await r.body());
-        if (b.length >= 5 && b.subarray(0, 5).toString("latin1").startsWith("%PDF")) return true;
+        const kind = detectAttachmentBufferKind(b);
+        if (kind === "pdf" || kind === "zip" || kind === "doc") return true;
         if (
           (ct.includes("application/octet-stream") || ct.includes("binary")) &&
           b.length >= 16 &&
@@ -815,6 +841,9 @@ async function tryIceTradeGetFileViaCardClick(context, timeoutMs, fileUrl, iceCa
       }
     }
 
+    // #region agent log
+    _dbgClickFlowFail({ viewId, nParam, fileUrl, tableLinkFilename, modalLinkFilename });
+    // #endregion
     return null;
   } finally {
     await pg.close();
