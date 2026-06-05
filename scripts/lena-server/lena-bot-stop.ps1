@@ -38,13 +38,31 @@ function Stop-LenaWindowsService {
   $name = "tender-prep-lena"
   $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
   if (-not $svc) { return $false }
-  if ($svc.Status -in @("Running", "StartPending", "Paused", "PausePending")) {
-    Write-Host "Stopping service $name (status=$($svc.Status))..."
-    Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
-    for ($i = 0; $i -lt 15; $i++) {
+
+  $nssm = $null
+  foreach ($c in @(
+    (Get-Command nssm -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source),
+    "C:\tools\nssm\nssm.exe"
+  )) {
+    if ($c -and (Test-Path $c)) { $nssm = $c; break }
+  }
+  if ($nssm) {
+    & $nssm stop $name 2>&1 | Out-Null
+  }
+
+  if ($svc.Status -in @("Running", "StartPending", "Paused", "PausePending", "Stopped")) {
+    if ($svc.Status -ne "Stopped") {
+      Write-Host "Stopping service $name (status=$($svc.Status))..."
+      Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
+    }
+    for ($i = 0; $i -lt 20; $i++) {
       Start-Sleep -Milliseconds 400
       $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
-      if ($svc.Status -eq "Stopped") { break }
+      if ($svc.Status -eq "Stopped") { return $true }
+      if ($svc.Status -eq "Paused") {
+        Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
+        if ($nssm) { & $nssm stop $name 2>&1 | Out-Null }
+      }
     }
     return $true
   }
@@ -65,7 +83,20 @@ function Read-TelegramBotTokenFromEnv {
   return $null
 }
 
+function Test-TelegramDnsReachable {
+  try {
+    $null = Resolve-DnsName api.telegram.org -ErrorAction Stop
+    return $true
+  } catch {
+    return $false
+  }
+}
+
 function Clear-TelegramWebhook {
+  if (-not (Test-TelegramDnsReachable)) {
+    Write-Host "WARN: skip deleteWebhook — DNS cannot resolve api.telegram.org"
+    return
+  }
   $token = $env:TELEGRAM_BOT_TOKEN
   if (-not $token) { $token = Read-TelegramBotTokenFromEnv }
   if (-not $token) {

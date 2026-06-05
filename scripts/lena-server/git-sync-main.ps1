@@ -46,7 +46,7 @@ if (-not $SkipStop) {
   Start-Sleep -Seconds 2
 }
 
-$dnsScript = Join-Path $PSScriptRoot "test-github-dns.ps1"
+$dnsScript = Join-Path $PSScriptRoot "test-server-network.ps1"
 & powershell -NoProfile -ExecutionPolicy Bypass -File $dnsScript
 $dnsEc = $LASTEXITCODE
 if ($dnsEc -ne 0 -and -not $AllowOfflineIfSynced) {
