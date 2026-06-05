@@ -115,6 +115,12 @@ if ($FetchOnly) {
 
 if ($localSha -eq $remoteSha) {
   Write-Host "OK: already on origin/main ($($remoteSha.Substring(0, [Math]::Min(7, $remoteSha.Length))))"
+  #region agent log
+  try {
+    $log = @{ sessionId = "cb2874"; runId = "deploy"; hypothesisId = "H4"; location = "git-sync-main.ps1:already-synced"; message = "exit 0 already on main"; data = @{ local = $localSha; remote = $remoteSha }; timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() } | ConvertTo-Json -Compress
+    Add-Content -LiteralPath (Join-Path $RepoRoot "debug-cb2874.log") -Value $log -Encoding UTF8
+  } catch {}
+  #endregion
   exit 0
 }
 
@@ -130,4 +136,10 @@ git clean -fd -e logs/ 2>&1 | Out-Null
 $headSha = Get-GitSha "HEAD"
 Write-Host "HEAD = $headSha"
 Write-Host "OK: updated to origin/main"
+#region agent log
+try {
+  $log = @{ sessionId = "cb2874"; runId = "deploy"; hypothesisId = "H4"; location = "git-sync-main.ps1:updated"; message = "exit 10 updated to main"; data = @{ head = $headSha; remote = $remoteSha }; timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() } | ConvertTo-Json -Compress
+  Add-Content -LiteralPath (Join-Path $RepoRoot "debug-cb2874.log") -Value $log -Encoding UTF8
+} catch {}
+#endregion
 exit 10

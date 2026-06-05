@@ -21,16 +21,20 @@ echo === Stop service before git (unlock .git/logs) ===
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\lena-server\lena-bot-stop.ps1" -RepoRoot "%CD%"
 
 echo === git sync origin/main ===
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\lena-server\git-sync-main.ps1" -RepoRoot "%CD%" -SkipStop -AllowOfflineIfSynced
-set "GIT_SYNC_EC=!ERRORLEVEL!"
-echo git-sync exit code: !GIT_SYNC_EC!
-if "!GIT_SYNC_EC!"=="1" (
+call :lena_git_sync
+set "LENA_GITSYNC_RC=!ERRORLEVEL!"
+REM #region agent log
+set "LENA_GITSYNC_RC=!LENA_GITSYNC_RC!"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=@{sessionId='cb2874';runId='deploy';hypothesisId='H1-H2';location='lena-bot.bat:git-sync';message='git-sync exit captured';data=@{rc=$env:LENA_GITSYNC_RC;gitSyn=$env:GIT_SYN};timestamp=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()}; Add-Content -LiteralPath (Join-Path (Get-Location) 'debug-cb2874.log') -Value ($p|ConvertTo-Json -Compress)" 2>nul
+REM #endregion
+echo git-sync exit code: !LENA_GITSYNC_RC!
+if !LENA_GITSYNC_RC! EQU 1 (
   echo [ERROR] git sync failed - see test-server-network.ps1 and DNS
   echo Offline restart only: scripts\lena-server\lena-bot-service-restart.ps1
   pause
   exit /b 1
 )
-if "!GIT_SYNC_EC!"=="10" (
+if !LENA_GITSYNC_RC! EQU 10 (
   echo === npm install ===
   call npm install --omit=dev
   if errorlevel 1 (
@@ -60,3 +64,7 @@ if "!EC!"=="0" (
 )
 pause
 exit /b !EC!
+
+:lena_git_sync
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\lena-server\git-sync-main.ps1" -RepoRoot "%CD%" -SkipStop -AllowOfflineIfSynced
+exit /b %ERRORLEVEL%
