@@ -50,8 +50,11 @@ Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
 
 if ($fail -ne 0) {
   Write-Host ""
-  Write-Host "Fix DNS example (replace InterfaceAlias):"
-  Write-Host '  Set-DnsClientServerAddress -InterfaceAlias "Ethernet" -ServerAddresses ("8.8.8.8","1.1.1.1")'
+  $ifaces = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.InterfaceAlias -notmatch "Loopback" -and $_.InterfaceAlias -notmatch "Pseudo" })
+  $alias = if ($ifaces.Count -gt 0) { $ifaces[0].InterfaceAlias } else { "Ethernet0" }
+  Write-Host "Fix DNS example (use your InterfaceAlias, e.g. $alias):"
+  Write-Host "  Set-DnsClientServerAddress -InterfaceAlias `"$alias`" -ServerAddresses (`"8.8.8.8`",`"1.1.1.1`")"
   exit $fail
 }
 Write-Host ""

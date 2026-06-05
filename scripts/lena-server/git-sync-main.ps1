@@ -24,12 +24,26 @@ $env:GIT_OPTIONAL_LOCKS = "0"
 $deployKey = "C:\Users\deploy\.ssh\id_ed25519_github"
 $knownHosts = "C:\Users\deploy\.ssh\known_hosts"
 if (Test-Path $deployKey) {
+  New-Item -ItemType Directory -Force -Path (Split-Path $knownHosts) | Out-Null
+  $hasGithubHost = $false
+  if (Test-Path $knownHosts) {
+    $hasGithubHost = @(Get-Content -LiteralPath $knownHosts -ErrorAction SilentlyContinue |
+      Where-Object { $_ -match "github\.com" }).Count -gt 0
+  }
+  if (-not $hasGithubHost) {
+    $scan = ssh-keyscan -t ed25519 github.com 2>$null
+    if ($scan) {
+      Add-Content -Path $knownHosts -Value $scan -Encoding ASCII
+      Write-Host "Added github.com to deploy known_hosts"
+    }
+  }
   $keyPosix = ($deployKey -replace "\\", "/")
   $khPosix = ($knownHosts -replace "\\", "/")
   $env:GIT_SSH_COMMAND = "ssh -i `"$keyPosix`" -o IdentitiesOnly=yes -o UserKnownHostsFile=`"$khPosix`" -o StrictHostKeyChecking=accept-new"
   Write-Host "GIT_SSH_COMMAND: deploy GitHub key"
 } else {
   Write-Host "WARN: deploy key not found at $deployKey"
+  Write-Host "Use git-sync-main.ps1 only after deploy key setup, or run lena-bot.bat"
 }
 
 Set-Location $RepoRoot
