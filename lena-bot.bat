@@ -28,17 +28,17 @@ if "%LOCAL%"=="%REMOTE%" (
   echo Код актуален ^(%LOCAL:~0,7%^).
 ) else (
   echo Обновление: %LOCAL:~0,7% -^> %REMOTE:~0,7%
+  echo === Остановка службы перед git clean (логи в logs/ заняты процессом) ===
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\lena-server\lena-bot-stop.ps1" -RepoRoot "%CD%"
   git reset --hard origin/main
   if errorlevel 1 (
     echo [Ошибка] git reset
     pause
     exit /b 1
   )
-  git clean -fd
+  git clean -fd -e logs/
   if errorlevel 1 (
-    echo [Ошибка] git clean
-    pause
-    exit /b 1
+    echo [Внимание] git clean — часть файлов могла остаться (занятые логи не критичны)
   )
   echo Код обновлён.
   echo === npm install ===
