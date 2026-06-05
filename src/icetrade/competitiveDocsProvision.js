@@ -11,11 +11,16 @@ const SNAPSHOT_ARTIFACT_NAMES = new Set([
 
 const POSITIVE_REQUEST_MARKERS = [
   /письменн\w*\s+запрос/i,
+  /(?:по|на)\s+электронн\w*\s+почт/i,
   /по\s+электронн\w*\s+почт/i,
   /нарочн\w*\s+способ/i,
   /выда\w*[\s\S]{0,120}при\s+условии\s+поступлен/i,
   /запрос\w*\s+на\s+получен/i,
   /при\s+условии\s+поступлен\w*[\s\S]{0,80}запрос/i,
+  /по\s+запрос\w*[\s\S]{0,80}(?:электронн\w*\s+почт|[a-z0-9._%+-]+@)/i,
+  /можно\s+получ\w*[\s\S]{0,100}по\s+запрос/i,
+  /после\s+получен\w*\s+письменн\w*\s+запрос/i,
+  /конкурсн\w*\s+документ\w*[\s\S]{0,160}предоставля\w*[\s\S]{0,100}(?:запрос|почт|@)/i,
 ];
 
 const NEGATIVE_ONLY_MARKERS = [
@@ -56,12 +61,45 @@ export function isSnapshotArtifactFileName(name) {
 }
 
 /**
- * @param {unknown} snap
- * @returns {string}
+ * @param {string | null | undefined} raw
  */
-export function extractProvisionTermsText(snap) {
-  if (!snap || typeof snap !== "object") return "";
+function stringField(raw) {
+  return typeof raw === "string" ? raw.trim() : "";
+}
+
+/**
+ * @param {string} kl
+ */
+function labeledKeyMatchesProvisionTopic(kl) {
+  if (/выдач/.test(kl) && /конкурсн/.test(kl)) return true;
+  if (/конкурсн/.test(kl) && /документ/.test(kl) && /предостав/.test(kl)) return true;
+  if (/конкурсн/.test(kl) && /документ/.test(kl) && /(?:предоставлен|выдач|получен|порядок|срок)/.test(kl)) {
+    return true;
+  }
+  if (/документ/.test(kl) && /техническ/.test(kl)) return true;
+  if (/иные\s+сведен/.test(kl)) return true;
+  return false;
+}
+
+/**
+ * @param {string} val
+ */
+function labeledValueMatchesProvisionTopic(val) {
+  const vl = val.toLowerCase();
+  if (!/[a-z0-9._%+-]+@/.test(vl)) return false;
+  return /(?:по|на)\s+запрос|электронн\w*\s+почт|письменн\w*\s+запрос|можно\s+получ/i.test(vl);
+}
+
+/**
+ * @param {unknown} snap
+ * @returns {string[]}
+ */
+export function buildProvisionCorpusParts(snap) {
+  if (!snap || typeof snap !== "object") return [];
   const o = /** @type {Record<string, unknown>} */ (snap);
+  /** @type {string[]} */
+  const parts = [];
+
   const st =
     o.structured && typeof o.structured === "object"
       ? /** @type {Record<string, unknown>} */ (o.structured)
@@ -70,9 +108,24 @@ export function extractProvisionTermsText(snap) {
     st?.competitiveDocuments && typeof st.competitiveDocuments === "object"
       ? /** @type {Record<string, unknown>} */ (st.competitiveDocuments)
       : null;
-  const fromStruct =
-    typeof comp?.provisionTerms === "string" ? comp.provisionTerms.trim() : "";
-  if (fromStruct) return fromStruct;
+  const proc =
+    st?.procedure && typeof st.procedure === "object"
+      ? /** @type {Record<string, unknown>} */ (st.procedure)
+      : null;
+  const general =
+    st?.general && typeof st.general === "object"
+      ? /** @type {Record<string, unknown>} */ (st.general)
+      : null;
+
+  for (const raw of [
+    comp?.provisionTerms,
+    comp?.documentPrice,
+    proc?.otherInfo,
+    general?.subjectShortDescription,
+  ]) {
+    const t = stringField(raw);
+    if (t) parts.push(t);
+  }
 
   const labeled =
     o.labeledFields && typeof o.labeledFields === "object"
@@ -80,18 +133,55 @@ export function extractProvisionTermsText(snap) {
       : null;
   if (labeled) {
     for (const [k, val] of Object.entries(labeled)) {
+      const t = String(val ?? "").trim();
+      if (!t) continue;
       const kl = k.toLowerCase();
-      if (
-        /конкурсн/.test(kl) &&
-        /документ/.test(kl) &&
-        /(?:предоставлен|выдач|получен|порядок|срок)/.test(kl) &&
-        val?.trim()
-      ) {
-        return val.trim();
+      if (labeledKeyMatchesProvisionTopic(kl) || labeledValueMatchesProvisionTopic(t)) {
+        parts.push(t);
       }
     }
   }
-  return "";
+
+  return parts;
+}
+
+/**
+ * @param {unknown} snap
+ * @returns {string}
+ */
+export function buildProvisionCorpus(snap) {
+  /** @type {Set<string>} */
+  const seen = new Set();
+  /** @type {string[]} */
+  const out = [];
+  for (const part of buildProvisionCorpusParts(snap)) {
+    const norm = part.replace(/\s+/g, " ").trim();
+    if (!norm || seen.has(norm)) continue;
+    seen.add(norm);
+    out.push(norm);
+  }
+  return out.join("\n\n");
+}
+
+/**
+ * @param {unknown} snap
+ * @returns {string}
+ */
+export function extractProvisionTermsText(snap) {
+  return buildProvisionCorpus(snap);
+}
+
+/**
+ * @param {string} corpus
+ * @param {number} [maxLen]
+ */
+export function buildProvisionExcerpt(corpus, maxLen = 300) {
+  const t = String(corpus || "").replace(/\s+/g, " ").trim();
+  if (!t) return null;
+  const m =
+    /(?:выда\w*[\s\S]{0,220}|конкурсн\w*\s+документ\w*[\s\S]{0,220}|можно\s+получ\w*[\s\S]{0,220})/i.exec(t);
+  const slice = (m?.[0] ?? t).trim();
+  return slice.length > maxLen ? `${slice.slice(0, maxLen)}…` : slice;
 }
 
 /**
@@ -108,11 +198,32 @@ function textRequiresCustomerRequest(text) {
 }
 
 /**
- * @param {unknown} snap
+ * @param {string} corpus
+ * @param {string[]} emails
  */
-export function cardRequiresCustomerRequest(snap) {
+function emptyAttachmentsFallbackRequiresRequest(corpus, emails) {
+  const t = String(corpus || "").trim();
+  if (t.length < 15) return false;
+  const hasEmail = /[a-z0-9._%+-]+@[a-z0-9][a-z0-9.-]+\.[a-z]{2,}/i.test(t) || emails.length > 0;
+  if (!hasEmail) return false;
+  return /(?:по|на)\s+запрос|электронн\w*\s+почт|письменн\w*\s+запрос|можно\s+получ/i.test(t);
+}
+
+/**
+ * @param {unknown} snap
+ * @param {"empty" | "sample_only" | "full_documentation"} [attachmentClass]
+ */
+export function cardRequiresCustomerRequest(snap, attachmentClass = "empty") {
   const text = extractProvisionTermsText(snap);
-  return textRequiresCustomerRequest(text);
+  if (textRequiresCustomerRequest(text)) return true;
+  const emails =
+    snap && typeof snap === "object" && Array.isArray(/** @type {Record<string, unknown>} */ (snap).emails)
+      ? /** @type {string[]} */ (/** @type {Record<string, unknown>} */ (snap).emails).map((e) => String(e))
+      : [];
+  if (attachmentClass === "empty") {
+    return emptyAttachmentsFallbackRequiresRequest(text, emails);
+  }
+  return false;
 }
 
 /**
@@ -124,7 +235,12 @@ export function pickProvisionMethod(text, emails = []) {
   const t = String(text || "");
   const emailInText = /[a-z0-9._%+-]+@[a-z0-9][a-z0-9.-]+\.[a-z]{2,}/i.exec(t);
   if (emailInText) return "email";
-  if (emails.length > 0 && /(?:электронн\w*\s+почт|e-mail|email|@\s)/i.test(t)) return "email";
+  if (
+    emails.length > 0 &&
+    /(?:электронн\w*\s+почт|e-mail|email|(?:по|на)\s+электронн|@)/i.test(t)
+  ) {
+    return "email";
+  }
   if (/нарочн|лично|представител|при\s+посещени/i.test(t)) return "in_person";
   return "unknown";
 }
@@ -138,7 +254,7 @@ export function pickProvisionEmail(text, emails = []) {
   const m = /[a-z0-9._%+-]+@[a-z0-9][a-z0-9.-]+\.[a-z]{2,}/i.exec(t);
   if (m) return m[0].toLowerCase();
   if (emails.length === 1) return emails[0].toLowerCase();
-  if (emails.length > 1 && /(?:электронн\w*\s+почт|e-mail|email)/i.test(t)) {
+  if (emails.length > 1 && /(?:электронн\w*\s+почт|e-mail|email|(?:по|на)\s+электронн)/i.test(t)) {
     return emails[0].toLowerCase();
   }
   return null;
@@ -195,16 +311,21 @@ export function classifyInputAttachmentSet(fileNames) {
  *   method?: "email" | "in_person" | "unknown",
  *   email?: string | null,
  *   inputsFolderWebViewLink?: string,
+ *   provisionExcerpt?: string | null,
  * }} p
  * @returns {string}
  */
 export function formatCustomerDocRequestMessage(p) {
   const link = p.inputsFolderWebViewLink?.trim();
   const linkLine = link ? `\n\n**Загрузите комплект в inputs:** ${link}` : "";
+  const excerptLine = p.provisionExcerpt?.trim()
+    ? `\n\n**Порядок выдачи (с карточки):** ${p.provisionExcerpt.trim()}`
+    : "";
 
   if (p.method === "email" && p.email) {
     return [
       "**Конкурсные документы у заказчика** (на IceTrade полного комплекта нет).",
+      excerptLine,
       "",
       `Отправьте **письменный запрос** (PDF) на **${p.email}**; укажите email для ответа и подтвердите получение документов.`,
       linkLine,
@@ -219,6 +340,7 @@ export function formatCustomerDocRequestMessage(p) {
   if (p.method === "in_person") {
     return [
       "**Конкурсные документы у заказчика** (на IceTrade полного комплекта нет).",
+      excerptLine,
       "",
       "Нужен **письменный запрос** и получение комплекта **лично в офисе заказчика**.",
       linkLine,
@@ -232,6 +354,7 @@ export function formatCustomerDocRequestMessage(p) {
 
   return [
     "**Конкурсные документы выдаются только по запросу заказчику** (см. карточку IceTrade).",
+    excerptLine,
     linkLine,
     "",
     "После загрузки на Drive нажмите **«Документы загружены»**.",
@@ -258,6 +381,23 @@ export function formatCustomerDocRequestMessage(p) {
 
 /**
  * @param {{
+ *   method: "email" | "in_person" | "unknown",
+ *   email: string | null,
+ *   inputsFolderWebViewLink?: string,
+ *   provisionTermsText: string,
+ * }} p
+ */
+function buildGateRequestMessage(p) {
+  return formatCustomerDocRequestMessage({
+    method: p.method,
+    email: p.email,
+    inputsFolderWebViewLink: p.inputsFolderWebViewLink,
+    provisionExcerpt: buildProvisionExcerpt(p.provisionTermsText),
+  });
+}
+
+/**
+ * @param {{
  *   snap?: unknown,
  *   uploadedNames?: string[],
  *   inputsFolderWebViewLink?: string,
@@ -268,13 +408,13 @@ export function resolveProvisionGate(p) {
   const snap = p.snap;
   const uploadedNames = p.uploadedNames ?? [];
   const provisionTermsText = extractProvisionTermsText(snap);
-  const cardRequiresRequest = textRequiresCustomerRequest(provisionTermsText);
   const attachmentClass = classifyInputAttachmentSet(uploadedNames);
 
   const emails =
     snap && typeof snap === "object" && Array.isArray(/** @type {Record<string, unknown>} */ (snap).emails)
       ? /** @type {string[]} */ (/** @type {Record<string, unknown>} */ (snap).emails).map((e) => String(e))
       : [];
+  const cardRequiresRequest = cardRequiresCustomerRequest(snap, attachmentClass);
   const method = pickProvisionMethod(provisionTermsText, emails);
   const email = pickProvisionEmail(provisionTermsText, emails);
 
@@ -286,23 +426,21 @@ export function resolveProvisionGate(p) {
   let message = null;
 
   if (cardRequiresRequest) {
+    const msgParams = {
+      method,
+      email,
+      inputsFolderWebViewLink: p.inputsFolderWebViewLink,
+      provisionTermsText,
+    };
     if (attachmentClass === "empty") {
       importAction = "block_analyze";
       postExtractAction = null;
-      message = formatCustomerDocRequestMessage({
-        method,
-        email,
-        inputsFolderWebViewLink: p.inputsFolderWebViewLink,
-      });
+      message = buildGateRequestMessage(msgParams);
     } else {
       importAction = "continue_analyze";
       if (attachmentClass === "sample_only") {
         postExtractAction = "show_request_and_wait";
-        message = formatCustomerDocRequestMessage({
-          method,
-          email,
-          inputsFolderWebViewLink: p.inputsFolderWebViewLink,
-        });
+        message = buildGateRequestMessage(msgParams);
       } else {
         postExtractAction = "normal";
       }
@@ -345,10 +483,11 @@ export function resolvePostExtractProvisionGate(p) {
     return {
       ...gate,
       postExtractAction: "show_request_and_wait",
-      message: formatCustomerDocRequestMessage({
+      message: buildGateRequestMessage({
         method: gate.method,
         email: gate.email,
         inputsFolderWebViewLink: p.inputsFolderWebViewLink,
+        provisionTermsText: gate.provisionTermsText,
       }),
     };
   }

@@ -13,6 +13,12 @@ import {
 const BELAPB_TERMS =
   "Конкурсные документы выдаются Заказчиком участнику конкурса на русском языке бесплатно до конечного срока подачи конкурсных предложений при условии поступления от Участника письменного запроса, подписанного руководителем, одним из следующих способов: по электронной почте на адрес tender2@belapb.by с приложением файла в формате pdf; нарочным способом от представителя Участника";
 
+const MAZ_SUBJECT =
+  "Документы и техническое задание по процедуре проведения конкурса можно получить по запросу на электронную почту uit-zakupki@maz.by";
+
+const MAZ_ISSUANCE =
+  "Выдача конкурсных документов: до 15ч.00мин. (минское время) 18.06.2026г.; Конкурсные документы предоставляются: в электронном виде - .PDF после получения письменного запроса на электронную почту - uit-zakupki@maz.by ;";
+
 function snapWithTerms(terms, emails = ["tender2@belapb.by"]) {
   return {
     emails,
@@ -24,6 +30,16 @@ function snapWithTerms(terms, emails = ["tender2@belapb.by"]) {
   };
 }
 
+function snapMazLabeledFields() {
+  return {
+    emails: ["uit-zakupki@maz.by"],
+    labeledFields: {
+      "Краткое описание предмета закупки": MAZ_SUBJECT,
+      "Выдача конкурсных документов": MAZ_ISSUANCE,
+    },
+  };
+}
+
 describe("cardRequiresCustomerRequest", () => {
   it("detects email + in-person request from belapb example", () => {
     assert.equal(cardRequiresCustomerRequest(snapWithTerms(BELAPB_TERMS)), true);
@@ -31,6 +47,15 @@ describe("cardRequiresCustomerRequest", () => {
 
   it("returns false when provision terms missing", () => {
     assert.equal(cardRequiresCustomerRequest({ structured: {} }), false);
+  });
+
+  it("detects MAZ text from labeledFields without provisionTerms", () => {
+    assert.equal(cardRequiresCustomerRequest(snapMazLabeledFields()), true);
+  });
+
+  it("detects request on electronic mail phrasing without written request", () => {
+    const t = "Документы можно получить по запросу на электронную почту zakupki@example.by";
+    assert.equal(cardRequiresCustomerRequest(snapWithTerms(t, ["zakupki@example.by"])), true);
   });
 });
 
@@ -87,9 +112,11 @@ describe("formatCustomerDocRequestMessage", () => {
       method: "email",
       email: "tender2@belapb.by",
       inputsFolderWebViewLink: "https://drive.google.com/folder/abc",
+      provisionExcerpt: "Выдача конкурсных документов: до 15ч.00мин. 18.06.2026",
     });
     assert.match(msg, /tender2@belapb\.by/);
     assert.match(msg, /drive\.google\.com/);
+    assert.match(msg, /Порядок выдачи/);
   });
 });
 
@@ -119,6 +146,18 @@ describe("resolveProvisionGate", () => {
       uploadedNames: [],
     });
     assert.equal(gate.importAction, "normal");
+  });
+
+  it("blocks analyze for MAZ with empty inputs", () => {
+    const gate = resolveProvisionGate({
+      snap: snapMazLabeledFields(),
+      uploadedNames: ["icetrade-import-snapshot.json"],
+      inputsFolderWebViewLink: "https://drive.google.com/folder/maz",
+    });
+    assert.equal(gate.importAction, "block_analyze");
+    assert.equal(gate.email, "uit-zakupki@maz.by");
+    assert.match(gate.message ?? "", /uit-zakupki@maz\.by/);
+    assert.match(gate.message ?? "", /Порядок выдачи/);
   });
 });
 
