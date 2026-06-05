@@ -3,9 +3,9 @@
   Синхронизация C:\tender-prep с origin/main (ключ deploy, без интерактива).
 
   Exit codes:
-    0  — уже на origin/main или fetch не удался, но локальный HEAD = кэш origin/main
-   10  — обновлён (нужен npm install)
-    1  — ошибка (нет сети и код устарел, или reset failed)
+    0  - already on origin/main, or fetch failed but HEAD matches cached origin/main
+   10  - updated (run npm install)
+    1  - error (offline and outdated, or reset failed)
 
   cd C:\tender-prep\scripts\lena-server
   .\git-sync-main.ps1

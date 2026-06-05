@@ -5,7 +5,7 @@
 
     .\install-scheduled-task.ps1 -RunAsUser DOMAIN\svc-lena
 
-  Если -RunAsUser не задан — задача от текущего пользователя (нужен вход в систему).
+  Если -RunAsUser не задан - задача от текущего пользователя (нужен вход в систему).
 #>
 param(
   [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,

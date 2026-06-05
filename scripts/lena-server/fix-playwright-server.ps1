@@ -45,7 +45,7 @@ if (Test-Path $envFile) {
   Set-Content -Path $envFile -Value $raw -Encoding UTF8 -NoNewline
   Write-Host "Updated $envFile"
 } else {
-  Write-Host "No .env — add manually: $line"
+  Write-Host "No .env - add manually: $line"
 }
 
 Write-Host ""

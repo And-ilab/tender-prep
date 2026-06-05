@@ -16,6 +16,6 @@ if ($procs.Count -eq 0) {
 } elseif ($procs.Count -eq 1) {
   Write-Host ("node lena-bot.mjs: PID {0}" -f $procs[0].ProcessId)
 } else {
-  Write-Host ("WARN: node lena-bot.mjs: {0} процессов — будет Conflict в Telegram" -f $procs.Count)
+  Write-Host ("WARN: node lena-bot.mjs: {0} processes - Telegram Conflict likely" -f $procs.Count)
   foreach ($p in $procs) { Write-Host ("  PID {0}" -f $p.ProcessId) }
 }

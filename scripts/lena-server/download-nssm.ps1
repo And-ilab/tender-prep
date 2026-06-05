@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 <#
-  Скачивает готовый nssm.exe (win64) — официальный nssm.cc часто недоступен.
+  Скачивает готовый nssm.exe (win64) - официальный nssm.cc часто недоступен.
   .\download-nssm.ps1
   .\download-nssm.ps1 -DestDir C:\tools\nssm
 #>

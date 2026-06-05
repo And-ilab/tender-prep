@@ -14,7 +14,7 @@ try {
   Write-Host "DNS OK: github.com -> $($r.IPAddress)"
   $dnsOk = $true
 } catch {
-  Write-Host "DNS FAIL: cannot resolve github.com — $($_.Exception.Message)"
+  Write-Host "DNS FAIL: cannot resolve github.com - $($_.Exception.Message)"
 }
 
 if (-not $dnsOk) {

@@ -2,7 +2,7 @@
 <#
   Install Lena on Windows Server (always-on).
   .\install-windows.ps1 -RepoRoot C:\tender-prep
-  -SkipPlaywright — skip Chromium download
+  -SkipPlaywright - skip Chromium download
 #>
 param(
   [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
