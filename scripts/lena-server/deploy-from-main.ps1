@@ -85,7 +85,7 @@ if ($localSha -ne $remoteSha) {
   git reset --hard $remoteRef
   if ($LASTEXITCODE -ne 0) { throw "git reset failed ($LASTEXITCODE)" }
 } else {
-  Write-DeployLog "Already on $remoteSha — continuing (npm/service refresh)"
+  Write-DeployLog "Already on $remoteSha - continuing (npm/service refresh)"
 }
 
 Write-DeployLog "npm install"

@@ -62,7 +62,7 @@ foreach ($k in @("TELEGRAM_BOT_TOKEN", "LENA_DRIVE_ROOT")) {
   $inMachine = [bool]([Environment]::GetEnvironmentVariable($k, "Machine"))
   Write-Host ("  {0}: .env={1} process={2} user={3} machine={4}" -f $k, $inFile, $inProc, $inUser, $inMachine)
   if (-not $inFile -and ($inUser -or $inMachine)) {
-    Write-Host "  WARN: $k only in Windows env — LocalSystem service reads .env only"
+    Write-Host ("  WARN: {0} only in Windows env - LocalSystem service reads .env only" -f $k)
   }
 }
 
@@ -104,7 +104,7 @@ foreach ($c in @(
 if ($nssm) {
   foreach ($k in @("Application", "AppParameters", "AppDirectory", "AppEnvironmentExtra")) {
     $v = & $nssm get tender-prep-lena $k 2>&1
-    Write-Host "  $k = $v"
+    Write-Host ("  {0} = {1}" -f $k, $v)
   }
 }
 
