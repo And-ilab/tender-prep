@@ -15,7 +15,8 @@
     "icetrade:diagnose-download-with-prime": "node scripts/icetrade-download-diagnose.mjs --demo --use-download-prime",
     "icetrade:diagnose-download-headless": "node scripts/icetrade-download-diagnose.mjs",
     "icetrade:headless-smoke": "node scripts/icetrade-headless-smoke.mjs",
-    "icetrade:smoke-demo-log": "node scripts/icetrade-headless-smoke.mjs --verbose"
+    "icetrade:smoke-demo-log": "node scripts/icetrade-headless-smoke.mjs --verbose",
+    "test": "node --test src/analysis/"
   },
   "engines": {
     "node": ">=20"

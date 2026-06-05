@@ -8,7 +8,7 @@
 | **2 · Extract** | `extractTenderInputDocumentsToExtracted`, `tenders tender-extract`, `/tenderextract` | файлы в `inputs/` | `inputs/extracted/*.txt`, `extract-manifest.json` | есть; PDF/DOC/DOCX — базово |
 | **3 · Card** | `buildTenderTelegramCard`, `tenders tender-card`, `/tendercard` | `inputs/extracted` + опционально HTML IceTrade | `notes/tender-card-*.md`, сообщение Telegram | есть |
 | **4 · Analyze** | `analyzeTenderAfterBootstrap`, кнопка «Анализ документов» в Telegram | текст из inputs | `notes/icetrade-analysis-*.md`; в чат — состав документов → компания → чеклист | есть |
-| **4b · Checklist** | `documentChecklist.js`, `lena-bot.mjs` | результат Analyze | Telegram: Лена / догрузка + ссылки Drive → «Документы загружены» | в разработке |
+| **4b · Checklist** | `documentChecklist.js`, `canonicalDocumentTypes.js`, `lena-bot.mjs` | результат Analyze | Telegram: «К подаче» → компания → догрузка + ссылки Drive → «Документы загружены» | есть |
 | **5 · Commercial terms** | мастер в Telegram, `/tenderprice` | ответы менеджера | `notes/manager-price-quote.md` | есть |
 | **6 · KP** | `runCommercialProposalDraftToDrive`, «Сформировать КП» | компания + условия + Preparation | `drafts/` | есть |
 
@@ -25,6 +25,24 @@
 Отдельный процесс: **не смешивать** с Import. После ручного добавления файлов в `inputs/` снова запускают **Extract**.
 
 Папка **`inputs/extracted/`** создаётся **только** внутри `_lena/tenders/<год>/<view>/inputs/` (родитель каталога `extracted` всегда — папка **`inputs`** тендера). Если **Telegram** или CLI при парсинге создали на «Моём диске» в корне несколько папок с именем **`extracted`**, почти всегда это неверный **`LENA_DRIVE_ROOT`**: должен быть тот же корень, что для **`drive workspace-ensure`** (родитель для `_lena/`), а не id другой папки или файла. Перед извлечением код проверяет метаданные каталога `inputs`; при рассинхроне — ошибка с подсказкой, без создания папки в корне.
+
+## Checklist (4b)
+
+Эталонные типы документов — [`src/analysis/canonicalDocumentTypes.js`](../src/analysis/canonicalDocumentTypes.js) (21 тип). Нормализация и фильтры — [`src/analysis/documentChecklist.js`](../src/analysis/documentChecklist.js).
+
+**Правила ветвления КД** (ГС Ритейл / Финсельват):
+
+| Ветка в КД | Наша роль | В чеклист |
+|------------|-----------|-----------|
+| Резидент / нерезидент | Резидент РБ | Только документы **явной ветки резидента** (свидетельство о гос. регистрации и т.д.). **Не** выписка из торгового реестра |
+| Производитель / представитель | Не производитель | Только ветка **представителя** (дилерское/агентское соглашение). **Не** справка ТПП |
+| Документы из ТЗ | — | Конкретные названия из текста ТЗ, не абстрактная фраза |
+
+П. **3.2 КД** («Документы и сведения…»): каждый нумерованный подпункт = отдельная строка «К подаче».
+
+Новые типы (2026-06): `state_registration_certificate`, `dealer_representative_docs`, `conformity_declarations`, `compliance_statement`, `tz_compliance_table`.
+
+Тесты нормализации: `npm test` → `src/analysis/canonicalDocumentTypes.test.mjs`.
 
 ## Дальнейшие процессы
 

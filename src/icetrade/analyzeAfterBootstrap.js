@@ -29,6 +29,7 @@ import {
   applyCanonicalNamesToStructured,
   buildRequiredDocumentsList,
   formatDocumentCompositionStep1Telegram,
+  isExcludedParticipantRequirement,
   isNonResidentOnlyRequirement,
 } from "../analysis/documentChecklist.js";
 import { canonicalTitlesForAnalysisPrompt } from "../analysis/canonicalDocumentTypes.js";
@@ -265,10 +266,10 @@ function keepOnlyCorpusGrounded(structured, corpus) {
     return {
       ...structured,
       lenaCanPrepare: structured.lenaCanPrepare
-        .filter((x) => !isNonResidentOnlyRequirement(x))
+        .filter((x) => !isExcludedParticipantRequirement(x))
         .map(({ name, basis }) => ({ name, basis })),
       managerMustProvide: structured.managerMustProvide
-        .filter((x) => !isNonResidentOnlyRequirement(x))
+        .filter((x) => !isExcludedParticipantRequirement(x))
         .map(({ name, reason, criteria }) => ({
           name,
           reason,
@@ -297,8 +298,8 @@ function keepOnlyCorpusGrounded(structured, corpus) {
 
   return {
     ...structured,
-    lenaCanPrepare: lenaOk.filter((x) => !isNonResidentOnlyRequirement(x)),
-    managerMustProvide: mgrOk.filter((x) => !isNonResidentOnlyRequirement(x)),
+    lenaCanPrepare: lenaOk.filter((x) => !isExcludedParticipantRequirement(x)),
+    managerMustProvide: mgrOk.filter((x) => !isExcludedParticipantRequirement(x)),
   };
 }
 
@@ -617,7 +618,9 @@ export async function analyzeTenderAfterBootstrap(userRootId, tenderId, opts = {
     "- submissionDeadline — одна строка: **дата/время окончания приёма** заявок (дедлайн), как в блоке; иначе null. submissionDeadlineEvidence — дословная цитата 15+ символов; иначе submissionDeadline=null.",
     `- lenaCanPrepare[]: только документ/действие, явно следующие из текста заказчика или карточки. Поле name — **максимально близко** к типовым названиям: ${canonicalTitlesForAnalysisPrompt()}. У каждого элемента: name, basis (кратко откуда по смыслу), evidence — дословная цитата 15+ символов из блока. Нет цитаты — не включай элемент. Никаких «аналог из RAG».`,
     `- managerMustProvide[]: только если участнику/менеджеру **прямо** требуется внешний документ или данные по тексту блока. Поле name — **максимально близко** к типовым названиям (см. выше). evidence — дословная цитата 15+ символов. criteria — только то, что дословно или почти дословно есть в блоке; иначе null (не заполняй «типично для РБ»).`,
-    "- **Резидент РБ:** обе наши организации (**ГС Ритейл** и **Финсельват**) — **резиденты Республики Беларусь**. **Не включай** в lenaCanPrepare и managerMustProvide требования, которые по тексту относятся **исключительно** к нерезидентам / иностранным участникам / особым правилам для нерезидентов — для матрицы их **пропускай**. Если в КД даны ветки «резидент / нерезидент», отражай в матрице **только ветку резидента**.",
+    "- **Резидент РБ:** обе наши организации (**ГС Ритейл** и **Финсельват**) — **резиденты Республики Беларусь**. **Не включай** выписку из торгового реестра и иные документы **только для нерезидентов**. Если в КД даны ветки «резидент / нерезидент», отражай **только ветку резидента** — документы, **явно** указанные для резидентов (свидетельство о гос. регистрации и т.д.), с дословной цитатой из КД.",
+    "- **Не производители:** обе организации — **не производители**. В КД с ветками «производитель / представитель» включай **только ветку представителя** (дилерское, агентское, комиссионное соглашение). **Не включай** справку ТПП и документы **только для производителей**.",
+    "- **П.3.2 КД:** разделы «Документы и сведения…» — **каждый нумерованный подпункт** = отдельный элемент чеклиста. П. «документы, указанные в ТЗ» — извлекай **конкретные** названия из текста ТЗ (декларации, таблица соответствия и т.д.), не оставляй абстрактной фразой. Заявление о согласии с условиями КД/проекта договора → lenaCanPrepare.",
     "Если фрагментов мало — пустые массивы и nullы нормальны.",
     "Форма ответа (ключи строго):",
     '{"tenderTitle":string|null,"tenderTitleEvidence":string,"sumOrBudget":string|null,"sumOrBudgetEvidence":string,"submissionOverview":string|null,"submissionOverviewQuotes":string[],"submissionMethod":string|null,"submissionMethodEvidence":string,"submissionDeadline":string|null,"submissionDeadlineEvidence":string,"lenaCanPrepare":[{"name":string,"basis":string,"evidence":string}],"managerMustProvide":[{"name":string,"reason":string,"criteria":string|null,"evidence":string}]}',

@@ -32,13 +32,20 @@ export function stripRequirementParentheticals(name) {
 }
 
 /**
+ * @param {{ name?: string, basis?: string, reason?: string, criteria?: string, evidence?: string }} item
+ */
+function requirementBlob(item) {
+  return [item.name, item.basis, item.reason, item.criteria, item.evidence]
+    .filter(Boolean)
+    .join(" ");
+}
+
+/**
  * Пункт матрицы относится только к нерезидентам — не показываем (ГС Ритейл / Финсельват — резиденты РБ).
  * @param {{ name?: string, basis?: string, reason?: string, criteria?: string, evidence?: string }} item
  */
 export function isNonResidentOnlyRequirement(item) {
-  const blob = [item.name, item.basis, item.reason, item.criteria, item.evidence]
-    .filter(Boolean)
-    .join(" ");
+  const blob = requirementBlob(item);
   if (/только\s+для\s+нерезидент|исключительно.*нерезидент|ветк\w*\s+нерезидент/i.test(blob)) {
     return true;
   }
@@ -46,7 +53,43 @@ export function isNonResidentOnlyRequirement(item) {
     if (/участник\w*[-\s]резидент|резидент\w*\s+рб|для\s+резидент/i.test(blob)) return false;
     return true;
   }
+  if (/выписк\w*\s+из\s+торгового\s+реестра|выписк\w*\s+егр/i.test(blob)) {
+    return true;
+  }
+  if (/торговый\s+реестр/i.test(blob) && /стран\w*\s+учрежден|нерезидент|иностранн/i.test(blob)) {
+    return true;
+  }
   return false;
+}
+
+/**
+ * Пункт матрицы относится только к производителям — не показываем (ГС Ритейл / Финсельват — не производители).
+ * @param {{ name?: string, basis?: string, reason?: string, criteria?: string, evidence?: string }} item
+ */
+export function isManufacturerOnlyRequirement(item) {
+  const blob = requirementBlob(item);
+  if (/представител|дилер|агентск|комиссионн|дистрибьютор/i.test(blob)) {
+    if (/производител|производств/i.test(blob) && /\bили\b/i.test(blob)) return false;
+    if (/официальн\s+представител|торговый\s+представител/i.test(blob)) return false;
+  }
+  if (
+    /справка\s+тпп|торгово-промышленн|для\s+производител|сертификат\s+собственного\s+производства|подтверждени\w*\s+статуса\s+производител/i.test(
+      blob,
+    )
+  ) {
+    return true;
+  }
+  if (/производител/i.test(blob) && !/представител|дилер|агент/i.test(blob)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * @param {{ name?: string, basis?: string, reason?: string, criteria?: string, evidence?: string }} item
+ */
+export function isExcludedParticipantRequirement(item) {
+  return isNonResidentOnlyRequirement(item) || isManufacturerOnlyRequirement(item);
 }
 
 /**
@@ -55,7 +98,22 @@ export function isNonResidentOnlyRequirement(item) {
 export function submissionDisplayTitle(doc) {
   if (doc.id !== "other") return doc.title;
   const stripped = stripRequirementParentheticals(doc.rawName);
+  const low = stripped.toLowerCase();
+  if (low.includes("документы, указанные в") || low.includes("документы указанные в")) {
+    return "Документы по техническому заданию";
+  }
   return stripped || doc.title;
+}
+
+/**
+ * @param {string} docId
+ * @param {string} title
+ */
+export function uploadTargetDisplayTitle(docId, title) {
+  if (docId === "dealer_representative_docs") {
+    return `${title} (дилерское/агентское соглашение с производителем)`;
+  }
+  return title;
 }
 
 /**
@@ -66,13 +124,13 @@ export function applyCanonicalNamesToStructured(structured) {
   return {
     ...structured,
     lenaCanPrepare: structured.lenaCanPrepare
-      .filter((x) => !isNonResidentOnlyRequirement(x))
+      .filter((x) => !isExcludedParticipantRequirement(x))
       .map((x) => {
         const n = normalizeToCanonicalDocument(stripRequirementParentheticals(x.name) || x.name);
         return { ...x, name: n.title };
       }),
     managerMustProvide: structured.managerMustProvide
-      .filter((x) => !isNonResidentOnlyRequirement(x))
+      .filter((x) => !isExcludedParticipantRequirement(x))
       .map((x) => {
         const n = normalizeToCanonicalDocument(stripRequirementParentheticals(x.name) || x.name);
         return { ...x, name: n.title };
@@ -89,9 +147,10 @@ function normalizeItemList(preparedBy, items) {
   /** @type {Map<string, NormalizedDoc>} */
   const map = new Map();
   for (const x of items) {
-    if (isNonResidentOnlyRequirement(x)) continue;
+    if (isExcludedParticipantRequirement(x)) continue;
     const cleanName = stripRequirementParentheticals(x.name) || x.name;
     const n = normalizeToCanonicalDocument(cleanName);
+    if (n.id === "egr_extract") continue;
     const key = n.id !== "other" ? n.id : `other:${n.rawName}`;
     const existing = map.get(key);
     const source = preparedBy;
@@ -240,7 +299,7 @@ export function formatRefinedChecklistStep2Telegram(
   } else {
     for (const t of uploadTargets) {
       const link = linkById.get(t.docId) ?? t.webViewLink;
-      lines.push(`- ${t.title} — [загрузить](${link})`);
+      lines.push(`- ${uploadTargetDisplayTitle(t.docId, t.title)} — [загрузить](${link})`);
     }
   }
 
