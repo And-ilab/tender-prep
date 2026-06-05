@@ -91,6 +91,7 @@ export async function runTenderInputsExtractForTelegram(p) {
   const requiredDocuments = buildRequiredDocumentsList(ar.structured);
   const inputsFolderWebViewLink =
     "inputsFolderWebViewLink" in ar ? ar.inputsFolderWebViewLink : undefined;
+  const extractFileNames = ex.items.map((i) => String(i.sourceName ?? "")).filter(Boolean);
   const step1Text = formatDocumentCompositionStep1Telegram(
     ar.structured,
     requiredDocuments,
@@ -105,6 +106,7 @@ export async function runTenderInputsExtractForTelegram(p) {
     structured: ar.structured,
     requiredDocuments,
     inputsFolderWebViewLink,
+    extractFileNames,
     step1Text,
   };
 }

@@ -4,6 +4,7 @@
  */
 
 import { bootstrapIceTradeToDrive } from "../icetrade/bootstrapDrive.js";
+import { resolveProvisionGate } from "../icetrade/competitiveDocsProvision.js";
 import {
   iceTradeCustomerValueIsDocReference,
   pickIceTradeCustomerOrganizationName,
@@ -261,18 +262,30 @@ export function iceTradeImportProgressMessage(viewId, importOnly) {
 /**
  * Полный ответ пользователю после успешного bootstrap и опциональных пост-шагов.
  * @param {{ rootId: string, messageText: string, env?: NodeJS.ProcessEnv }} opts
- * @returns {Promise<{ markdown: string, viewId: string }>}
+ * @returns {Promise<{
+ *   markdown: string,
+ *   viewId: string,
+ *   provisionGate: import("../icetrade/competitiveDocsProvision.js").ProvisionGate,
+ *   inputsFolderWebViewLink?: string,
+ *   importSnapshot?: unknown,
+ * }>}
  */
 export async function runIceTradeImportForMarkdown(opts) {
   const { rootId, messageText, env = process.env } = opts;
   const importOnly = telegramIceTradeImportOnlyEnabled(env);
 
   const r = await bootstrapIceTradeToDrive(rootId, messageText, {});
+  const uploadedNames = r.uploaded.map((u) => String(u.name ?? "")).filter(Boolean);
+  const provisionGate = resolveProvisionGate({
+    snap: r.importSnapshot,
+    uploadedNames,
+    inputsFolderWebViewLink: r.inputsFolderWebViewLink,
+  });
   const driveSaQuota = errorsIndicateDriveServiceAccountQuota(r.errors);
   const errBrief = formatIceTradeErrorsBriefForUser(r.errors);
 
   let analysisTail = "";
-  if (!importOnly) {
+  if (!importOnly && provisionGate.importAction !== "block_analyze") {
     analysisTail =
       "\n\nНажмите **«Анализ документов»** — разбор комплекта, список документов по КД и дальше по воронке.";
     if (!isLlmConfigured()) {
@@ -312,13 +325,16 @@ export async function runIceTradeImportForMarkdown(opts) {
       ? `\n_Уже были в inputs (**${skipped.length}** имён) — повторно не качали._`
       : "";
 
-  const footerLines = importOnly
-    ? ["", "Кнопка **«Анализ документов»** — извлечение текста из файлов (включая OCR)."]
-    : [
-        "",
-        `Также: **/tenderextract ${r.viewId}**, **/tendercard**, **/bundle**.`,
-        "_Полный режим после ссылки: **LENA_TELEGRAM_ICETRADE_IMPORT_ONLY=0**._",
-      ];
+  const footerLines =
+    provisionGate.importAction === "block_analyze"
+      ? []
+      : importOnly
+        ? ["", "Кнопка **«Анализ документов»** — извлечение текста из файлов (включая OCR)."]
+        : [
+            "",
+            `Также: **/tenderextract ${r.viewId}**, **/tendercard**, **/bundle**.`,
+            "_Полный режим после ссылки: **LENA_TELEGRAM_ICETRADE_IMPORT_ONLY=0**._",
+          ];
 
   const core = formatIceTradeImportShortSummary({
     viewId: r.viewId,
@@ -339,5 +355,11 @@ export async function runIceTradeImportForMarkdown(opts) {
     cardTail,
   ].filter((x) => typeof x === "string" && x.length > 0);
 
-  return { markdown: lines.join("\n"), viewId: String(r.viewId) };
+  return {
+    markdown: lines.join("\n"),
+    viewId: String(r.viewId),
+    provisionGate,
+    inputsFolderWebViewLink: r.inputsFolderWebViewLink,
+    importSnapshot: r.importSnapshot,
+  };
 }

@@ -108,6 +108,12 @@ import {
 import { OFFER_ORG, runCommercialProposalDraftToDrive } from "../analysis/commercialProposalLlm.js";
 import { runTenderInputsExtractForTelegram } from "../parse/tenderInputsParseFlow.js";
 import { buildRefinedChecklistTelegramBundle } from "../analysis/documentChecklist.js";
+import {
+  classifyInputAttachmentSet,
+  resolvePostExtractProvisionGate,
+} from "../icetrade/competitiveDocsProvision.js";
+import { readIceTradeImportSnapshot } from "../analysis/cpSnapshotHints.js";
+import { listChildren } from "../drive/ops.js";
 
 /** Сжатый дефолт для смоук-тестов; полные правила — docs/LENA_RULES.md. Переопределение: LENA_LLM_SYSTEM_PROMPT. */
 const DEFAULT_LLM_SYSTEM = [
@@ -257,7 +263,7 @@ function buildKpOrgInlineKeyboard(token, selected) {
 }
 
 /**
- * @typedef {"awaiting_org" | "awaiting_manager_docs" | "awaiting_manager_price" | "ready"} TenderFlowPhase
+ * @typedef {"awaiting_org" | "awaiting_customer_kd_upload" | "awaiting_manager_docs" | "awaiting_manager_price" | "ready"} TenderFlowPhase
  */
 
 /**
@@ -274,17 +280,33 @@ function buildKpOrgInlineKeyboard(token, selected) {
  * @property {import("../analysis/documentChecklist.js").AnalysisStructured} [analysisStructured]
  * @property {string} [analysisHintsCorpus]
  * @property {{ docId: string, title: string, webViewLink: string }[]} [uploadLinks]
+ * @property {string} [inputsFolderWebViewLink]
+ * @property {unknown} [importSnapshot]
+ */
+
+/**
+ * @typedef {Object} ImportDocsPending
+ * @property {string} tenderId
+ * @property {number} chatId
+ * @property {number} ts
+ * @property {unknown} [importSnapshot]
+ * @property {string} [inputsFolderWebViewLink]
  */
 
 /** @type {Map<string, ParseOrgPending>} */
 const parseOrgPending = new Map();
 
+/** @type {Map<string, ImportDocsPending>} */
+const importDocsPending = new Map();
+
 /** Выбор компании после парсинга: `lena_porg:s:<token>:0|1`; затем **Сформировать КП**: `lena_porg:g:<token>`. */
 const CB_PARSE_ORG_SELECT = "lena_porg:s:";
 const CB_PARSE_ORG_GO = "lena_porg:g:";
 const CB_MGR_DOCS_DONE = "lena_docs:";
+const CB_IMPORT_DOCS_DONE = "lena_import_docs:";
 
 const PARSE_ORG_PENDING_TTL_MS = 60 * 60 * 1000;
+const IMPORT_DOCS_PENDING_TTL_MS = 60 * 60 * 1000;
 
 /** @param {ParseOrgPending} p */
 function tenderFlowPhase(p) {
@@ -312,6 +334,77 @@ function pruneParseOrgPendingMap() {
   }
   if (parseOrgPending.size > 2000) parseOrgPending.clear();
   if (parseOrgGoConsumed.size > 8000) parseOrgGoConsumed.clear();
+}
+
+function pruneImportDocsPendingMap() {
+  const now = Date.now();
+  for (const [k, v] of importDocsPending) {
+    if (now - v.ts > IMPORT_DOCS_PENDING_TTL_MS) importDocsPending.delete(k);
+  }
+  if (importDocsPending.size > 2000) importDocsPending.clear();
+}
+
+function newImportDocsToken() {
+  return randomBytes(4).toString("hex");
+}
+
+/**
+ * @param {string} token
+ */
+function buildImportDocsDoneKeyboard(token) {
+  return {
+    inline_keyboard: [[{ text: "Документы загружены", callback_data: `${CB_IMPORT_DOCS_DONE}${token}` }]],
+  };
+}
+
+/**
+ * @param {string} rootFolderId
+ * @param {string} tenderId
+ * @param {{ flat?: boolean, year?: string }} [opts]
+ */
+async function listTenderInputFileNames(rootFolderId, tenderId, opts = {}) {
+  const { tender } = await ensureTenderTree(rootFolderId, tenderId, opts);
+  const kids = await listChildren(tender.inputsId);
+  return kids
+    .filter((f) => f.mimeType !== "application/vnd.google-apps.folder")
+    .map((f) => String(f.name ?? ""))
+    .filter(Boolean);
+}
+
+/**
+ * @param {number} chatId
+ * @param {number | undefined} chainReplyTo
+ * @param {Awaited<ReturnType<typeof runTenderInputsExtractForTelegram>> & { ok: true }} extractResult
+ * @param {string} pToken
+ */
+async function continueParseFlowAfterExtract(chatId, chainReplyTo, extractResult, pToken) {
+  assertCredentialsFile();
+  const snap =
+    extractResult.importSnapshot ??
+    (await readIceTradeImportSnapshot(
+      (await ensureTenderTree(rootId, extractResult.tenderId, extractResult.opts)).tender.inputsId,
+    ));
+  const gate = resolvePostExtractProvisionGate({
+    snap,
+    fileNames: extractResult.extractFileNames ?? [],
+    inputsFolderWebViewLink: extractResult.inputsFolderWebViewLink,
+  });
+  if (gate.postExtractAction === "show_request_and_wait" && gate.message) {
+    pruneParseOrgPendingMap();
+    parseOrgPending.set(pToken, {
+      tenderId: extractResult.tenderId,
+      opts: extractResult.opts,
+      chatId,
+      ts: Date.now(),
+      selected: null,
+      phase: "awaiting_customer_kd_upload",
+      inputsFolderWebViewLink: extractResult.inputsFolderWebViewLink,
+      importSnapshot: snap,
+    });
+    await sendTextChunks(chatId, chainReplyTo, gate.message, buildDocsDoneKeyboard(pToken));
+    return;
+  }
+  await sendDocumentChecklistStep1(chatId, chainReplyTo, extractResult, pToken);
 }
 
 /** Активное сообщение-якорь для ответа ценой: chatId:message_id → flow + token. */
@@ -924,20 +1017,41 @@ async function handleIceTradeBootstrap(chatId, replyTo, text) {
     progressMid = await sendText(chatId, replyTo, iceTradeImportProgressMessage(first, importOnly));
     const stopPulse = startChatActionPulse(chatId, chatActionForIceTradeImport());
     try {
-      const { markdown, viewId } = await runIceTradeImportForMarkdown({ rootId, messageText: text });
+      const { markdown, viewId, provisionGate, inputsFolderWebViewLink, importSnapshot } =
+        await runIceTradeImportForMarkdown({ rootId, messageText: text });
       const cbData = `${CB_PARSE_PREFIX}${viewId}`;
-      /** @type {Record<string, unknown> | undefined} */
-      const parseKeyboard =
-        cbData.length <= 64
-          ? {
-              inline_keyboard: [[{ text: "Анализ документов", callback_data: cbData }]],
-            }
-          : undefined;
-      if (!parseKeyboard) {
-        console.error(`[lena-bot] callback_data > 64 B, кнопка парсинга не добавлена (${cbData.length})`);
-      }
       const chainAnchor = typeof progressMid === "number" ? progressMid : replyTo;
-      await sendTextChunks(chatId, chainAnchor, markdown, parseKeyboard);
+
+      if (provisionGate.importAction === "block_analyze" && provisionGate.message) {
+        const iToken = newImportDocsToken();
+        pruneImportDocsPendingMap();
+        importDocsPending.set(iToken, {
+          tenderId: viewId,
+          chatId,
+          ts: Date.now(),
+          importSnapshot,
+          inputsFolderWebViewLink,
+        });
+        await sendTextChunks(chatId, chainAnchor, markdown);
+        await sendTextChunks(
+          chatId,
+          chainAnchor,
+          provisionGate.message,
+          buildImportDocsDoneKeyboard(iToken),
+        );
+      } else {
+        /** @type {Record<string, unknown> | undefined} */
+        const parseKeyboard =
+          cbData.length <= 64
+            ? {
+                inline_keyboard: [[{ text: "Анализ документов", callback_data: cbData }]],
+              }
+            : undefined;
+        if (!parseKeyboard) {
+          console.error(`[lena-bot] callback_data > 64 B, кнопка парсинга не добавлена (${cbData.length})`);
+        }
+        await sendTextChunks(chatId, chainAnchor, markdown, parseKeyboard);
+      }
     } finally {
       stopPulse();
     }
@@ -1706,12 +1820,143 @@ async function handleCallbackQuery(cq) {
     return;
   }
 
+  if (data.startsWith(CB_IMPORT_DOCS_DONE)) {
+    const token = data.slice(CB_IMPORT_DOCS_DONE.length).trim();
+    pruneImportDocsPendingMap();
+    const pending = importDocsPending.get(token);
+    if (!pending || pending.chatId !== chatId) {
+      await answerCallbackQuery(id, "Сообщение устарело.", true);
+      return;
+    }
+    await answerCallbackQuery(id, "Проверяю inputs…");
+    try {
+      /** @type {Record<string, unknown>} */
+      const rmBody = {
+        chat_id: chatId,
+        message_id: msgId,
+        reply_markup: { inline_keyboard: [] },
+      };
+      if (typeof outboundMessageThreadId === "number") rmBody.message_thread_id = outboundMessageThreadId;
+      await tgJson("editMessageReplyMarkup", rmBody);
+    } catch {
+      /* ignore */
+    }
+
+    const stopPulse = startChatActionPulse(chatId, chatActionForParsePipeline());
+    try {
+      assertCredentialsFile();
+      const names = await listTenderInputFileNames(rootId, pending.tenderId);
+      if (classifyInputAttachmentSet(names) === "empty") {
+        await sendText(
+          chatId,
+          msgId,
+          "В **inputs** пока нет файлов документации. Загрузите комплект на Drive и нажмите **«Документы загружены»** снова.",
+          { reply_markup: buildImportDocsDoneKeyboard(token) },
+        );
+        pending.ts = Date.now();
+        return;
+      }
+      if (!isLlmConfigured()) {
+        await sendText(
+          chatId,
+          msgId,
+          "Для анализа задайте **OPENAI_API_KEY** или **LENA_OPENAI_API_KEY**, затем нажмите **«Документы загружены»** снова.",
+        );
+        return;
+      }
+      const extractResult = await runTenderInputsExtractForTelegram({
+        rootId,
+        tenderId: pending.tenderId,
+        opts: {},
+      });
+      importDocsPending.delete(token);
+      const pToken = newParseOrgToken();
+      if (!extractResult.ok) {
+        await sendTextChunks(
+          chatId,
+          msgId,
+          [extractResult.extractBrief, extractResult.error].filter(Boolean).join("\n\n"),
+        );
+      } else {
+        await continueParseFlowAfterExtract(chatId, msgId, extractResult, pToken);
+      }
+    } catch (e) {
+      const err = e instanceof Error ? e.message : String(e);
+      await sendText(chatId, msgId, `Парсинг: ошибка — ${err.slice(0, 3500)}`);
+    } finally {
+      stopPulse();
+    }
+    return;
+  }
+
   if (data.startsWith(CB_MGR_DOCS_DONE)) {
     const token = data.slice(CB_MGR_DOCS_DONE.length).trim();
     pruneParseOrgPendingMap();
     const pending = parseOrgPending.get(token);
     if (!pending || pending.chatId !== chatId) {
       await answerCallbackQuery(id, "Сообщение устарело.", true);
+      return;
+    }
+    if (tenderFlowPhase(pending) === "awaiting_customer_kd_upload") {
+      await answerCallbackQuery(id, "Проверяю комплект…");
+      try {
+        /** @type {Record<string, unknown>} */
+        const rmBody = {
+          chat_id: chatId,
+          message_id: msgId,
+          reply_markup: { inline_keyboard: [] },
+        };
+        if (typeof outboundMessageThreadId === "number") rmBody.message_thread_id = outboundMessageThreadId;
+        await tgJson("editMessageReplyMarkup", rmBody);
+      } catch {
+        /* ignore */
+      }
+      const stopPulse = startChatActionPulse(chatId, chatActionForParsePipeline());
+      try {
+        assertCredentialsFile();
+        const names = await listTenderInputFileNames(rootId, pending.tenderId, pending.opts);
+        const snap =
+          pending.importSnapshot ??
+          (await readIceTradeImportSnapshot(
+            (await ensureTenderTree(rootId, pending.tenderId, pending.opts)).tender.inputsId,
+          ));
+        const gate = resolvePostExtractProvisionGate({
+          snap,
+          fileNames: names,
+          inputsFolderWebViewLink: pending.inputsFolderWebViewLink,
+        });
+        if (gate.postExtractAction === "show_request_and_wait") {
+          pending.ts = Date.now();
+          await sendText(
+            chatId,
+            msgId,
+            "В **inputs** пока только образец заявления или комплект не загружен. Положите **полную документацию заказчика** на Drive и нажмите **«Документы загружены»** снова.",
+            { reply_markup: buildDocsDoneKeyboard(token) },
+          );
+          return;
+        }
+        const extractResult = await runTenderInputsExtractForTelegram({
+          rootId,
+          tenderId: pending.tenderId,
+          opts: pending.opts,
+        });
+        if (!extractResult.ok) {
+          await sendTextChunks(
+            chatId,
+            msgId,
+            [extractResult.extractBrief, extractResult.error].filter(Boolean).join("\n\n"),
+          );
+          return;
+        }
+        pending.phase = "awaiting_org";
+        pending.ts = Date.now();
+        await sendDocumentChecklistStep1(chatId, msgId, extractResult, token);
+      } catch (e) {
+        const err = e instanceof Error ? e.message : String(e);
+        await sendText(chatId, msgId, `Парсинг: ошибка — ${err.slice(0, 3500)}`);
+      } finally {
+        stopPulse();
+      }
       return;
     }
     if (tenderFlowPhase(pending) !== "awaiting_manager_docs") {
@@ -1960,7 +2205,7 @@ async function handleCallbackQuery(cq) {
           [extractResult.extractBrief, extractResult.error].filter(Boolean).join("\n\n"),
         );
       } else {
-        await sendDocumentChecklistStep1(chatId, replyTo, extractResult, pToken);
+        await continueParseFlowAfterExtract(chatId, replyTo, extractResult, pToken);
       }
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e);
@@ -2180,7 +2425,7 @@ async function cmdTenderExtract(chatId, replyTo, args) {
         [extractResult.extractBrief, extractResult.error].filter(Boolean).join("\n\n"),
       );
     } else {
-      await sendDocumentChecklistStep1(chatId, statusMid ?? replyTo, extractResult, pToken);
+      await continueParseFlowAfterExtract(chatId, statusMid ?? replyTo, extractResult, pToken);
     }
   } catch (e) {
     const err = e instanceof Error ? e.message : String(e);

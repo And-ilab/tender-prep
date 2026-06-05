@@ -20,6 +20,19 @@
 
 Файл: **`inputs/icetrade-import-snapshot.json`**, поля см. `schemaVersion` / `kind` внутри файла; логические блоки карточки и стабильные ключи **`structured`** — [ICETRADE_CARD_SNAPSHOT.md](ICETRADE_CARD_SNAPSHOT.md).
 
+### КД по запросу заказчика (Telegram)
+
+Эвристики в [`src/icetrade/competitiveDocsProvision.js`](../src/icetrade/competitiveDocsProvision.js) читают **`structured.competitiveDocuments.provisionTerms`** из снимка и имена файлов в **inputs/**.
+
+| Ситуация | Import | После «Анализ документов» |
+|----------|--------|---------------------------|
+| Карточка **не** требует запрос | Как раньше — кнопка **«Анализ документов»** | Обычный список «К подаче» |
+| Карточка требует запрос, **вложений нет** | Сообщение менеджеру + ссылка **inputs** + **«Документы загружены»** (без «Анализ документов») | — (после загрузки — extract + analyze) |
+| Карточка требует запрос, **вложения есть** | Только **«Анализ документов»** (без предупреждения на Import) | **2а:** полная КД во вложениях → обычный список; **2б:** только образец заявления → сообщение + **inputs** + **«Документы загружены»** |
+| Два способа (email и лично) | В тексте подсказки приоритет **email** | то же |
+
+Триггер **«Документы загружены»** после загрузки комплекта в **inputs/** запускает extract + analyze и продолжает воронку.
+
 ## Extract (парсинг файлов)
 
 Отдельный процесс: **не смешивать** с Import. После ручного добавления файлов в `inputs/` снова запускают **Extract**.
@@ -42,7 +55,7 @@
 
 Новые типы (2026-06): `state_registration_certificate`, `dealer_representative_docs`, `conformity_declarations`, `compliance_statement`, `tz_compliance_table`.
 
-Тесты нормализации: `npm test` → `src/analysis/canonicalDocumentTypes.test.mjs`.
+Тесты нормализации: `npm test` → `src/analysis/` и `src/icetrade/` (в т.ч. `competitiveDocsProvision.test.mjs`).
 
 ## Дальнейшие процессы
 
