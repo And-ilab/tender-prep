@@ -141,21 +141,50 @@ LENA_EMBEDDING_API_KEY=длинный-секрет
 
 ### 8. Обновление кода на сервере
 
+**Рекомендуется** — одна команда от **администратора** (остановка службы, git с ключом deploy, Playwright, права SYSTEM, restart):
+
 ```powershell
 cd C:\tender-prep
-git pull
-npm install
-.\scripts\lena-server\install-windows.ps1
-Restart-Service tender-prep-lena
+.\lena-bot.bat
 ```
 
-Или одной командой (то же, что делает CI после push в **main**):
+PowerShell-вариант того же:
+
+```powershell
+cd C:\tender-prep
+.\scripts\lena-server\lena-bot-deploy.ps1
+```
+
+**Проверка после деплоя:**
+
+```powershell
+.\scripts\lena-server\verify-lena-server.ps1
+```
+
+В Telegram: `/help`. IceTrade: в `inputs/` на Drive должны быть все вложения (pdf, doc, docx).
+
+**Если `git fetch` завис или спрашивает `y/n`:**
+
+```powershell
+cd C:\tender-prep\scripts\lena-server
+.\lena-bot-stop.ps1
+taskkill /F /IM git.exe 2>$null
+.\git-sync-main.ps1
+cd C:\tender-prep
+.\lena-bot.bat
+```
+
+Не запускайте `git` из `C:\Users\…` — только из `C:\tender-prep`. Ручной fetch без `GIT_SSH_COMMAND` (ключ `C:\Users\deploy\.ssh\id_ed25519_github`) приведёт к запросу ключа GitHub.
+
+**CI / альтернатива** (то же, что GitHub Actions после push в **main**):
 
 ```powershell
 .\scripts\lena-server\deploy-from-main.ps1
 ```
 
 Лог: `logs\deploy.log`.
+
+**Не делайте:** `git pull` без ключа deploy; параллельно служба + ручной `node lena-bot.mjs` (Telegram Conflict).
 
 ---
 

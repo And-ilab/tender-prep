@@ -1,4 +1,5 @@
 @echo off
+REM Deploy + restart tender-prep-lena. Admin required. See scripts\lena-server\README.md section 8.
 setlocal EnableExtensions
 cd /d "%~dp0"
 
