@@ -64,7 +64,7 @@ $dnsScript = Join-Path $PSScriptRoot "test-server-network.ps1"
 & powershell -NoProfile -ExecutionPolicy Bypass -File $dnsScript
 $dnsEc = $LASTEXITCODE
 if ($dnsEc -ne 0 -and -not $AllowOfflineIfSynced) {
-  Write-Host "WARN: github.com not reachable — will try fetch anyway"
+  Write-Host "WARN: github.com not reachable - will try fetch anyway"
 }
 
 function Get-GitSha {
@@ -98,7 +98,7 @@ if (-not $fetchOk) {
   Write-Host ""
   Write-Host "WARN: git fetch failed"
   if ($localSha -and $remoteSha -and $localSha -eq $remoteSha) {
-    Write-Host "HEAD matches cached origin/main — continuing deploy without git update"
+    Write-Host "HEAD matches cached origin/main - continuing deploy without git update"
     Write-Host "Fix DNS/network, then rerun lena-bot.bat to pull newer commits"
     if ($FetchOnly) { exit 0 }
     exit 0

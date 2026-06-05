@@ -41,7 +41,7 @@ $playwright = Join-Path $PSScriptRoot "ensure-playwright-server.ps1"
 Write-Host "=== Playwright Chromium (SYSTEM) ==="
 & powershell -NoProfile -ExecutionPolicy Bypass -File $playwright -RepoRoot $RepoRoot
 if ($LASTEXITCODE -ne 0) {
-  Write-Host "WARN: ensure-playwright-server.ps1 — see output above"
+  Write-Host "WARN: ensure-playwright-server.ps1 - see output above"
 }
 
 $repair = Join-Path $PSScriptRoot "repair-service-permissions.ps1"

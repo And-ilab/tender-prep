@@ -52,14 +52,14 @@ if ($LASTEXITCODE -ne 0) { $fail = 1 }
 $dup = @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue |
   Where-Object { $_.CommandLine -and $_.CommandLine -like "*lena-bot.mjs*" })
 if ($dup.Count -gt 1) {
-  Write-Host "WARN: multiple lena-bot node processes ($($dup.Count)) — Telegram Conflict risk"
+  Write-Host "WARN: multiple lena-bot node processes ($($dup.Count)) - Telegram Conflict risk"
   $fail = 1
 } elseif ($dup.Count -eq 1) {
   Write-Host "node PID: $($dup[0].ProcessId)"
 }
 
 Write-Host ""
-Write-Host "Telegram: send /help — expect reply with Drive root and commands."
+Write-Host "Telegram: send /help - expect reply with Drive root and commands."
 Write-Host "IceTrade: after import, inputs/ on Drive should list all attachments (pdf, doc, docx), not PDF only."
 
 if ($fail -ne 0) {

@@ -22,7 +22,8 @@ function Write-DebugLog {
   }
   try {
     Add-Content -LiteralPath $debugLog -Value ($payload | ConvertTo-Json -Compress) -Encoding UTF8
-  } catch { /* ignore */ }
+  } catch { # ignore
+  }
 }
 
 function Find-Nssm {
@@ -133,7 +134,7 @@ function Start-LenaServiceRobust {
         return $true
       }
       if ($nssmSt -match "SERVICE_PAUSED" -or ($s -and $s.Status -eq "Paused")) {
-        Write-Host "WARN: service PAUSED after start — forcing stop before retry"
+        Write-Host "WARN: service PAUSED after start - forcing stop before retry"
         [void](Stop-LenaServiceHard -ServiceName $ServiceName -NssmExe $NssmExe)
         break
       }
@@ -161,7 +162,7 @@ $netEc = $LASTEXITCODE
 Write-DebugLog -Location "lena-bot-service-restart.ps1:network" -Message "network test result" -Data @{ exitCode = $netEc } -HypothesisId "H1"
 # #endregion
 if ($netEc -ne 0) {
-  Write-Host "WARN: DNS/network problem — bot may not reach Telegram/GitHub until fixed"
+  Write-Host "WARN: DNS/network problem - bot may not reach Telegram/GitHub until fixed"
   Write-Host "Continuing service restart anyway (local code can still run)."
 }
 

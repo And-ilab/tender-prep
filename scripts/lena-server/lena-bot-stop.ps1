@@ -94,7 +94,7 @@ function Test-TelegramDnsReachable {
 
 function Clear-TelegramWebhook {
   if (-not (Test-TelegramDnsReachable)) {
-    Write-Host "WARN: skip deleteWebhook — DNS cannot resolve api.telegram.org"
+    Write-Host "WARN: skip deleteWebhook - DNS cannot resolve api.telegram.org"
     return
   }
   $token = $env:TELEGRAM_BOT_TOKEN
