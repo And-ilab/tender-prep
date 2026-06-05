@@ -7,24 +7,6 @@ $stopScript = Join-Path $PSScriptRoot "lena-bot-stop.ps1"
 $logDir = Join-Path $RepoRoot "logs"
 $errLog = Join-Path $logDir "lena-bot.err.log"
 $outLog = Join-Path $logDir "lena-bot.log"
-$debugLog = Join-Path $RepoRoot "debug-1b4c7e.log"
-
-function Write-DebugLog {
-  param([string]$Location, [string]$Message, [hashtable]$Data, [string]$HypothesisId)
-  $payload = @{
-    sessionId  = "1b4c7e"
-    runId      = "service-restart"
-    location   = $Location
-    message    = $Message
-    data       = $Data
-    timestamp  = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-    hypothesisId = $HypothesisId
-  }
-  try {
-    Add-Content -LiteralPath $debugLog -Value ($payload | ConvertTo-Json -Compress) -Encoding UTF8
-  } catch { # ignore
-  }
-}
 
 function Find-Nssm {
   foreach ($c in @(
@@ -72,14 +54,6 @@ function Wait-LenaServiceStopped {
 function Stop-LenaServiceHard {
   param([string]$ServiceName, [string]$NssmExe)
   $sBefore = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-  $nssmBefore = Get-NssmStatusText -NssmExe $NssmExe -ServiceName $ServiceName
-  # #region agent log
-  Write-DebugLog -Location "lena-bot-service-restart.ps1:StopHard:before" -Message "stop service hard" -Data @{
-    scmStatus = $(if ($sBefore) { $sBefore.Status.ToString() } else { "missing" })
-    nssmStatus = $nssmBefore
-  } -HypothesisId "H2"
-  # #endregion
-
   if ($NssmExe) {
     Write-Host "nssm stop $ServiceName (pre-start cleanup) ..."
     & $NssmExe stop $ServiceName 2>&1 | ForEach-Object { Write-Host $_ }
@@ -87,17 +61,7 @@ function Stop-LenaServiceHard {
   if ($sBefore -and $sBefore.Status -ne "Stopped") {
     Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
   }
-  $ok = Wait-LenaServiceStopped -ServiceName $ServiceName -NssmExe $NssmExe
-  $nssmAfter = Get-NssmStatusText -NssmExe $NssmExe -ServiceName $ServiceName
-  $sAfter = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-  # #region agent log
-  Write-DebugLog -Location "lena-bot-service-restart.ps1:StopHard:after" -Message "stop service hard done" -Data @{
-    stoppedOk = $ok
-    scmStatus = $(if ($sAfter) { $sAfter.Status.ToString() } else { "missing" })
-    nssmStatus = $nssmAfter
-  } -HypothesisId "H2"
-  # #endregion
-  return $ok
+  return (Wait-LenaServiceStopped -ServiceName $ServiceName -NssmExe $NssmExe)
 }
 
 function Start-LenaServiceRobust {
@@ -124,13 +88,6 @@ function Start-LenaServiceRobust {
       $s = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
       $nssmSt = Get-NssmStatusText -NssmExe $NssmExe -ServiceName $ServiceName
       if ($s -and $s.Status -eq "Running" -and ($nssmSt -match "SERVICE_RUNNING" -or -not $nssmSt)) {
-        # #region agent log
-        Write-DebugLog -Location "lena-bot-service-restart.ps1:StartRobust:ok" -Message "service running" -Data @{
-          attempt = $attempt
-          scmStatus = $s.Status.ToString()
-          nssmStatus = $nssmSt
-        } -HypothesisId "H2"
-        # #endregion
         return $true
       }
       if ($nssmSt -match "SERVICE_PAUSED" -or ($s -and $s.Status -eq "Paused")) {
@@ -141,14 +98,6 @@ function Start-LenaServiceRobust {
     }
   }
 
-  $sFail = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-  $nssmFail = Get-NssmStatusText -NssmExe $NssmExe -ServiceName $ServiceName
-  # #region agent log
-  Write-DebugLog -Location "lena-bot-service-restart.ps1:StartRobust:fail" -Message "service not running" -Data @{
-    scmStatus = $(if ($sFail) { $sFail.Status.ToString() } else { "missing" })
-    nssmStatus = $nssmFail
-  } -HypothesisId "H2"
-  # #endregion
   return $false
 }
 
@@ -158,9 +107,6 @@ icacls $logDir /grant "SYSTEM:(OI)(CI)M" 2>$null | Out-Null
 Write-Host "=== Network check (DNS) ==="
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "test-server-network.ps1")
 $netEc = $LASTEXITCODE
-# #region agent log
-Write-DebugLog -Location "lena-bot-service-restart.ps1:network" -Message "network test result" -Data @{ exitCode = $netEc } -HypothesisId "H1"
-# #endregion
 if ($netEc -ne 0) {
   Write-Host "WARN: DNS/network problem - bot may not reach Telegram/GitHub until fixed"
   Write-Host "Continuing service restart anyway (local code can still run)."
