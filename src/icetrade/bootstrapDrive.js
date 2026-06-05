@@ -24,7 +24,8 @@ const VIEW_PAGE = (/** @type {string} */ id) => `https://icetrade.by/tenders/all
 /** @param {string} location @param {string} message @param {Record<string, unknown>} data @param {string} hypothesisId */
 function _dbgAgentLog(location, message, data, hypothesisId) {
   const payload = {
-    sessionId: "65c8b6",
+    sessionId: "1b4c7e",
+    runId: "pre-fix",
     location,
     message,
     data,
@@ -33,11 +34,11 @@ function _dbgAgentLog(location, message, data, hypothesisId) {
   };
   fetch("http://127.0.0.1:7273/ingest/0fbf9c34-aa58-4c41-8b66-36b66355e6e0", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "65c8b6" },
+    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "1b4c7e" },
     body: JSON.stringify(payload),
   }).catch(() => {});
   const line = `${JSON.stringify(payload)}\n`;
-  appendFile(join(process.cwd(), "debug-65c8b6.log"), line).catch(() => {});
+  appendFile(join(process.cwd(), "debug-1b4c7e.log"), line).catch(() => {});
   appendFile(join(process.cwd(), "logs", "icetrade-bootstrap-debug.ndjson"), line).catch(() => {});
 }
 // #endregion
@@ -498,9 +499,14 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
       candidatesCount: candidates.length,
       cardFetchVia: cardFetchVia ?? null,
       networkFileUrlsCount: networkFileUrls.length,
-      sampleUrls: candidates.slice(0, 3).map((c) => c.url),
+      candidateDetails: candidates.map((c) => ({
+        url: c.url,
+        linkText: c.linkText ?? null,
+        predictedName: predictInputFileNameBeforeDownload(c.url, c.linkText),
+        extFromLink: c.linkText?.match(/\.(pdf|docx?|zip|rar)/i)?.[0] ?? null,
+      })),
     },
-    "H3",
+    "H1",
   );
   // #endregion
   let inputChildren = await listChildren(inputsId);
@@ -565,7 +571,6 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
     "bootstrapDrive.js:download-plan",
     "download backends selected",
     {
-      runId: "post-fix",
       viewId,
       usePwBatchDl,
       playwrightEnabled: iceTradePlaywrightEnabled(),
@@ -612,7 +617,6 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
                 "bootstrapDrive.js:pw-validate-fail",
                 "playwright download rejected by validateAttachmentBuffer",
                 {
-                  runId: "post-fix-v2",
                   viewId,
                   fileUrl,
                   baseName,
@@ -655,7 +659,6 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
         "bootstrapDrive.js:pw-batch-done",
         "playwright batch finished without throw",
         {
-          runId: "post-fix",
           viewId,
           uploadedBeforePwBatch,
           uploadedAfterPwBatch: uploaded.length,
@@ -671,11 +674,10 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
         "bootstrapDrive.js:pw-batch-error",
         "playwright batch threw",
         {
-          runId: "post-fix",
           viewId,
           error: e instanceof Error ? e.message : String(e),
         },
-        "H1",
+        "H2",
       );
       // #endregion
       errors.push(
@@ -712,9 +714,9 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
         "bootstrapDrive.js:ps-batch-start",
         "powershell batch starting",
         {
-          runId: "post-fix",
           viewId,
           batchItemsCount: batchItems.length,
+          batchPredictedNames: batchItems.map((b) => b.fileName),
         },
         "H4",
       );
@@ -772,7 +774,6 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
           "bootstrapDrive.js:ps-batch-done",
           "powershell batch finished",
           {
-            runId: "post-fix",
             viewId,
             okCnt,
             batchItemsCount: batchItems.length,
@@ -827,7 +828,22 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
       });
       if (uploadedOk) n += 1;
     } catch (e) {
-      errors.push(`${fileUrl}: ${e instanceof Error ? e.message : String(e)}`);
+      const errMsg = e instanceof Error ? e.message : String(e);
+      errors.push(`${fileUrl}: ${errMsg}`);
+      // #region agent log
+      _dbgAgentLog(
+        "bootstrapDrive.js:http-fail",
+        "per-file HTTP download failed",
+        {
+          viewId,
+          fileUrl,
+          linkText: item.linkText ?? null,
+          predicted: predictInputFileNameBeforeDownload(fileUrl, item.linkText),
+          error: errMsg.slice(0, 300),
+        },
+        "H3",
+      );
+      // #endregion
     }
   }
 
@@ -864,7 +880,6 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
     "bootstrapDrive.js:final",
     "bootstrap complete",
     {
-      runId: "post-fix",
       viewId,
       uploadedCount: uploaded.length,
       uploadedNames: uploaded.map((u) => u.name),
