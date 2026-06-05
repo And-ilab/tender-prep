@@ -24,9 +24,11 @@ if (Test-Path $deployKey) {
 }
 
 Set-Location $RepoRoot
-Write-Host "=== git fetch origin main ==="
-git -c gc.auto=0 fetch origin main
-if ($LASTEXITCODE -ne 0) { throw "git fetch failed ($LASTEXITCODE)" }
+Write-Host "=== git fetch origin main (gc disabled) ==="
+git -c gc.auto=0 -c maintenance.auto=false fetch origin main
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "WARN: fetch exit code $LASTEXITCODE - trying git show with existing origin/main"
+}
 
 $remoteHead = (git rev-parse --short origin/main).Trim()
 Write-Host "origin/main = $remoteHead"
