@@ -6,7 +6,7 @@ import { assertCredentialsFile } from "../drive/config.js";
 import { getMetadata, listChildren, trashDriveFile, uploadFile } from "../drive/ops.js";
 import { ensureTenderTree } from "../drive/workspace.js";
 import { extractIceTradeViewIds, normalizeIceTradeViewId } from "./viewIds.js";
-import { fetchIceTradeCardHtml, downloadIceTradeBinary, downloadIceTradeBatchViaPowerShellSession, defaultIceTradeAttachmentFileName, validateAttachmentBuffer } from "./fetchPage.js";
+import { fetchIceTradeCardHtml, downloadIceTradeBinary, downloadIceTradeBatchViaPowerShellSession, defaultIceTradeAttachmentFileName, validateAttachmentBuffer, correctAttachmentFileNameFromBuffer } from "./fetchPage.js";
 import {
   fetchIceTradeCardHtmlPlaywright,
   iceTradePlaywrightEnabled,
@@ -15,7 +15,7 @@ import {
   withPlaywrightIceTradeDownloadBatch,
 } from "./fetchPageRendered.js";
 import { iceTradePythonFetchMode, runPythonIceTradeFetch } from "./bootstrapPythonSidecar.js";
-import { extractAttachmentCandidates, isIceTradeLoginWallHtml, isIceTradePlatformHelpAttachment } from "./scrapeAttachments.js";
+import { extractAttachmentCandidates, enrichAttachmentCandidatesLinkText, isIceTradeLoginWallHtml, isIceTradePlatformHelpAttachment } from "./scrapeAttachments.js";
 import { buildIceTradeImportSnapshot, importSnapshotToJson } from "./importPageMeta.js";
 
 const VIEW_PAGE = (/** @type {string} */ id) => `https://icetrade.by/tenders/all/view/${id}`;
@@ -25,7 +25,7 @@ const VIEW_PAGE = (/** @type {string} */ id) => `https://icetrade.by/tenders/all
 function _dbgAgentLog(location, message, data, hypothesisId) {
   const payload = {
     sessionId: "1b4c7e",
-    runId: "pre-fix",
+    runId: "post-fix",
     location,
     message,
     data,
@@ -189,7 +189,8 @@ async function downloadExternalToTemp(url, tmpRoot, timeoutMs, refererPageUrl, l
   });
   if (buffer.byteLength > maxBytes) throw new Error(`Файл слишком большой (${buffer.byteLength} байт)`);
 
-  const fileName = resolveDownloadFileName(url, linkText, contentDisposition);
+  let fileName = resolveDownloadFileName(url, linkText, contentDisposition);
+  fileName = correctAttachmentFileNameFromBuffer(buffer, fileName, linkText);
   const v = validateAttachmentBuffer(buffer, fileName, contentType, url);
   if (!v.ok) throw new Error(v.reason);
   const path = join(tmpRoot, `${Date.now()}-${fileName}`);
@@ -451,6 +452,7 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
     }
     const beforePlatformFilterInner = cand;
     cand = cand.filter((c) => !isIceTradePlatformHelpAttachment(c.url, c.linkText, viewId));
+    cand = enrichAttachmentCandidatesLinkText(html || "", pageUrl, cand);
     const removedAsPlatformInner = beforePlatformFilterInner.filter((c) =>
       isIceTradePlatformHelpAttachment(c.url, c.linkText, viewId),
     );
@@ -609,7 +611,8 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
             const { buffer, contentType, contentDisposition } = await requestBinary(fileUrl, pageUrl);
             const maxBytes = 45 * 1024 * 1024;
             if (buffer.byteLength > maxBytes) throw new Error(`Файл слишком большой (${buffer.byteLength} байт)`);
-            const baseName = resolveDownloadFileName(fileUrl, item.linkText, contentDisposition);
+            let baseName = resolveDownloadFileName(fileUrl, item.linkText, contentDisposition);
+            baseName = correctAttachmentFileNameFromBuffer(buffer, baseName, item.linkText);
             const v = validateAttachmentBuffer(buffer, baseName, contentType, fileUrl);
             if (!v.ok) {
               // #region agent log
@@ -741,7 +744,8 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
           }
           try {
             const buf = await readFile(r.path);
-            const baseName = resolveDownloadFileName(src.url, src.linkText, null);
+            let baseName = resolveDownloadFileName(src.url, src.linkText, null);
+            baseName = correctAttachmentFileNameFromBuffer(buf, baseName, src.linkText);
             const v = validateAttachmentBuffer(buf, baseName, null, src.url);
             if (!v.ok) {
               errors.push(`${src.url}: ${v.reason}`);

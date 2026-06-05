@@ -261,14 +261,47 @@ export function defaultIceTradeAttachmentFileName(fileUrl, linkText) {
     const u = new URL(fileUrl);
     const n = u.searchParams.get("n");
     if (n !== null && /^\d+$/.test(n) && /getfile/i.test(u.pathname)) {
-      return `document-${n}.pdf`;
+      return `document-${n}.bin`;
     }
     const base = u.pathname.split("/").pop() || "";
     if (/\.(pdf|docx?|zip|rar|7z)$/i.test(base)) return decodeURIComponent(base.split("?")[0]);
   } catch {
     /* ignore */
   }
-  return "download.pdf";
+  return "download.bin";
+}
+
+/**
+ * Исправить расширение по сигнатуре файла (getFile без linkText часто именуется как .pdf/.bin).
+ * @param {Buffer} buffer
+ * @param {string} fileName
+ * @param {string | undefined} linkText
+ */
+export function correctAttachmentFileNameFromBuffer(buffer, fileName, linkText) {
+  const kind = detectAttachmentBufferKind(buffer);
+  const t = linkText?.trim();
+  if (t && /\.(pdf|docx?|zip|rar|7z|xlsx?|pptx?)$/i.test(t)) {
+    const fromLink = t.replace(/[\\/:*?"<>|]+/g, "_").slice(0, 180);
+    const ext = fromLink.match(/(\.[a-z0-9]+)$/i)?.[1]?.toLowerCase() ?? "";
+    if (ext === ".pdf" && kind === "pdf") return fromLink;
+    if (ext === ".docx" && kind === "zip") return fromLink;
+    if (ext === ".doc" && kind === "doc") return fromLink;
+    if (ext === ".doc" && kind === "zip") return fromLink.replace(/\.doc$/i, ".docx");
+  }
+  const low = fileName.toLowerCase();
+  if (kind === "pdf" && !low.endsWith(".pdf")) {
+    const stem = fileName.replace(/\.[^.]+$/, "") || fileName;
+    return `${stem}.pdf`;
+  }
+  if (kind === "zip" && !/\.(docx|xlsx|pptx|zip)$/i.test(low)) {
+    const stem = fileName.replace(/\.(pdf|bin)$/i, "").replace(/\.[^.]+$/, "") || fileName;
+    return `${stem}.docx`;
+  }
+  if (kind === "doc" && !low.endsWith(".doc")) {
+    const stem = fileName.replace(/\.(pdf|bin)$/i, "").replace(/\.[^.]+$/, "") || fileName;
+    return `${stem}.doc`;
+  }
+  return fileName;
 }
 
 /**
@@ -447,6 +480,12 @@ export function validateAttachmentBuffer(buffer, fileName, contentType, fileUrl)
   if (/\.xlsx$/i.test(low) && kind === "zip") return { ok: true };
   if (/\.pptx$/i.test(low) && kind === "zip") return { ok: true };
   if (/\.zip$/i.test(low) && kind === "zip") return { ok: true };
+  if ((/\.bin$/i.test(low) || /^document-\d+$/i.test(low)) && (kind === "pdf" || kind === "zip" || kind === "doc")) {
+    return { ok: true };
+  }
+  if (low.endsWith(".pdf") && (kind === "zip" || kind === "doc")) {
+    return { ok: true };
+  }
 
   if (low.endsWith(".pdf")) {
     const sig = buffer.subarray(0, 5).toString("latin1");

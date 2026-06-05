@@ -362,3 +362,35 @@ export function extractAttachmentCandidates(html, pageUrl) {
 
   return out.filter((c) => !isIceTradePlatformHelpAttachment(c.url, c.linkText, undefined));
 }
+
+/**
+ * Дополнить linkText из текста &lt;a&gt; (сеть/голые getFile-URL часто без имени файла).
+ * @param {string} html
+ * @param {string} pageUrl
+ * @param {IceTradeAttachmentLink[]} candidates
+ */
+export function enrichAttachmentCandidatesLinkText(html, pageUrl, candidates) {
+  if (!html || !candidates.length) return candidates;
+  const base = new URL(pageUrl);
+  /** @type {Map<string, string>} */
+  const byUrl = new Map();
+  const re =
+    /<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const raw = decodeHtmlEntities((m[1] ?? m[2] ?? m[3] ?? "").trim());
+    const inner = decodeHtmlEntities(stripTags(String(m[4] ?? ""))).trim();
+    if (!raw || !inner || !/\.(pdf|docx?|zip|rar|7z|xlsx?)\b/i.test(inner)) continue;
+    try {
+      byUrl.set(new URL(raw, base).href, inner);
+    } catch {
+      /* ignore */
+    }
+  }
+  if (!byUrl.size) return candidates;
+  return candidates.map((c) => {
+    if (c.linkText) return c;
+    const lt = byUrl.get(c.url);
+    return lt ? { ...c, linkText: lt } : c;
+  });
+}
