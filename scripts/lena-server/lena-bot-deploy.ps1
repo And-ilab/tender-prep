@@ -26,7 +26,7 @@ Set-Location $RepoRoot
 Write-Host "=== tender-prep: deploy + service restart (PowerShell) ==="
 
 $gitSync = Join-Path $PSScriptRoot "git-sync-main.ps1"
-& powershell -NoProfile -ExecutionPolicy Bypass -File $gitSync -RepoRoot $RepoRoot
+& powershell -NoProfile -ExecutionPolicy Bypass -File $gitSync -RepoRoot $RepoRoot -AllowOfflineIfSynced
 $gitEc = $LASTEXITCODE
 if ($gitEc -ne 0 -and $gitEc -ne 10) {
   throw "git-sync-main failed ($gitEc)"

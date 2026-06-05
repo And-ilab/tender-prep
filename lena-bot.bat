@@ -21,36 +21,15 @@ echo === Остановка службы перед git (снять блокир
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\lena-server\lena-bot-stop.ps1" -RepoRoot "%CD%"
 
 echo === Проверка origin/main ===
-git -c gc.auto=0 -c maintenance.auto=false fetch origin main
-if errorlevel 1 (
-  echo Повтор git fetch через 3 сек...
-  timeout /t 3 /nobreak >nul
-  git -c gc.auto=0 -c maintenance.auto=false fetch origin main
-  if errorlevel 1 (
-    echo [Ошибка] git fetch — закройте другие git/IDE и повторите
-    pause
-    exit /b 1
-  )
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\lena-server\git-sync-main.ps1" -RepoRoot "%CD%" -SkipStop -AllowOfflineIfSynced
+set "GIT_SYNC_EC=%ERRORLEVEL%"
+if "%GIT_SYNC_EC%"=="1" (
+  echo [Ошибка] git sync — см. test-github-dns.ps1 и интернет/DNS на сервере
+  echo Без сети: перезапуск только — scripts\lena-server\lena-bot-service-restart.ps1
+  pause
+  exit /b 1
 )
-
-for /f "delims=" %%H in ('git rev-parse HEAD 2^>nul') do set "LOCAL=%%H"
-for /f "delims=" %%H in ('git rev-parse origin/main 2^>nul') do set "REMOTE=%%H"
-
-if "%LOCAL%"=="%REMOTE%" (
-  echo Код актуален ^(%LOCAL:~0,7%^).
-) else (
-  echo Обновление: %LOCAL:~0,7% -^> %REMOTE:~0,7%
-  git reset --hard origin/main
-  if errorlevel 1 (
-    echo [Ошибка] git reset
-    pause
-    exit /b 1
-  )
-  git clean -fd -e logs/
-  if errorlevel 1 (
-    echo [Внимание] git clean — часть файлов могла остаться (занятые логи не критичны)
-  )
-  echo Код обновлён.
+if "%GIT_SYNC_EC%"=="10" (
   echo === npm install ===
   call npm install --omit=dev
   if errorlevel 1 (

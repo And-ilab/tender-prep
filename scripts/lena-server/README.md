@@ -163,6 +163,17 @@ cd C:\tender-prep
 
 В Telegram: `/help`. IceTrade: в `inputs/` на Drive должны быть все вложения (pdf, doc, docx).
 
+**Если `Could not resolve hostname github.com` (DNS):**
+
+```powershell
+.\scripts\lena-server\test-github-dns.ps1
+Get-DnsClientServerAddress -AddressFamily IPv4
+# пример: задать публичный DNS (имя адаптера смотрите в выводе выше)
+Set-DnsClientServerAddress -InterfaceAlias "Ethernet" -ServerAddresses ("8.8.8.8","1.1.1.1")
+```
+
+Если код на диске уже актуален, `lena-bot.bat` **продолжит** перезапуск службы без fetch. Иначе сначала почините DNS, затем снова `.\lena-bot.bat`.
+
 **Если `git fetch` завис или спрашивает `y/n`:**
 
 ```powershell

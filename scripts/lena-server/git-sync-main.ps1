@@ -1,21 +1,23 @@
 #Requires -Version 5.1
 <#
   Синхронизация C:\tender-prep с origin/main (ключ deploy, без интерактива).
-  Используйте при сбое git fetch в lena-bot.bat или при ручном обновлении.
+
+  Exit codes:
+    0  — уже на origin/main или fetch не удался, но локальный HEAD = кэш origin/main
+   10  — обновлён (нужен npm install)
+    1  — ошибка (нет сети и код устарел, или reset failed)
 
   cd C:\tender-prep\scripts\lena-server
   .\git-sync-main.ps1
-
-  Только fetch без reset:
-  .\git-sync-main.ps1 -FetchOnly
 #>
 param(
   [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
   [switch]$FetchOnly,
-  [switch]$SkipStop
+  [switch]$SkipStop,
+  [switch]$AllowOfflineIfSynced
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $env:GIT_TERMINAL_PROMPT = "0"
 $env:GIT_OPTIONAL_LOCKS = "0"
 
@@ -27,12 +29,13 @@ if (Test-Path $deployKey) {
   $env:GIT_SSH_COMMAND = "ssh -i `"$keyPosix`" -o IdentitiesOnly=yes -o UserKnownHostsFile=`"$khPosix`" -o StrictHostKeyChecking=accept-new"
   Write-Host "GIT_SSH_COMMAND: deploy GitHub key"
 } else {
-  Write-Host "WARN: deploy key not found at $deployKey — git may ask for GitHub host key"
+  Write-Host "WARN: deploy key not found at $deployKey"
 }
 
 Set-Location $RepoRoot
 if (-not (Test-Path (Join-Path $RepoRoot ".git"))) {
-  throw "Not a git repo: $RepoRoot — cd to repo root (e.g. C:/tender-prep) first"
+  Write-Host "FAIL: not a git repo: $RepoRoot"
+  exit 1
 }
 
 if (-not $SkipStop) {
@@ -43,24 +46,53 @@ if (-not $SkipStop) {
   Start-Sleep -Seconds 2
 }
 
-function Invoke-GitFetch {
-  git -c gc.auto=0 -c maintenance.auto=false fetch origin main
-  if ($LASTEXITCODE -ne 0) {
-    Start-Sleep -Seconds 3
-    git -c gc.auto=0 -c maintenance.auto=false fetch origin main
-  }
-  if ($LASTEXITCODE -ne 0) {
-    throw "git fetch failed ($LASTEXITCODE). Close IDE/git, rerun git-sync-main.ps1"
-  }
+$dnsScript = Join-Path $PSScriptRoot "test-github-dns.ps1"
+& powershell -NoProfile -ExecutionPolicy Bypass -File $dnsScript
+$dnsEc = $LASTEXITCODE
+if ($dnsEc -ne 0 -and -not $AllowOfflineIfSynced) {
+  Write-Host "WARN: github.com not reachable — will try fetch anyway"
+}
+
+function Get-GitSha {
+  param([string]$Ref)
+  $s = (git rev-parse $Ref 2>$null)
+  if ($LASTEXITCODE -ne 0) { return $null }
+  return $s.Trim()
+}
+
+$localBefore = Get-GitSha "HEAD"
+$remoteBefore = Get-GitSha "origin/main"
+
+function Invoke-GitFetchOnce {
+  git -c gc.auto=0 -c maintenance.auto=false fetch origin main 2>&1 | ForEach-Object { Write-Host $_ }
+  return ($LASTEXITCODE -eq 0)
 }
 
 Write-Host "=== git fetch origin main ==="
-Invoke-GitFetch
+$fetchOk = Invoke-GitFetchOnce
+if (-not $fetchOk) {
+  Start-Sleep -Seconds 3
+  $fetchOk = Invoke-GitFetchOnce
+}
 
-$localSha = (git rev-parse HEAD 2>$null).Trim()
-$remoteSha = (git rev-parse origin/main 2>$null).Trim()
+$localSha = Get-GitSha "HEAD"
+$remoteSha = Get-GitSha "origin/main"
 Write-Host "local  = $localSha"
 Write-Host "remote = $remoteSha"
+
+if (-not $fetchOk) {
+  Write-Host ""
+  Write-Host "WARN: git fetch failed"
+  if ($localSha -and $remoteSha -and $localSha -eq $remoteSha) {
+    Write-Host "HEAD matches cached origin/main — continuing deploy without git update"
+    Write-Host "Fix DNS/network, then rerun lena-bot.bat to pull newer commits"
+    if ($FetchOnly) { exit 0 }
+    exit 0
+  }
+  Write-Host "FAIL: cannot fetch and local code may be outdated (HEAD != origin/main or no origin/main)"
+  Write-Host "Run: .\scripts\lena-server\test-github-dns.ps1"
+  exit 1
+}
 
 if ($FetchOnly) {
   Write-Host "FetchOnly: skip reset"
@@ -74,14 +106,14 @@ if ($localSha -eq $remoteSha) {
 
 Write-Host "=== git reset --hard origin/main ==="
 git reset --hard origin/main
-if ($LASTEXITCODE -ne 0) { throw "git reset failed ($LASTEXITCODE)" }
-
-git clean -fd -e logs/
 if ($LASTEXITCODE -ne 0) {
-  Write-Host "WARN: git clean — some locked files may remain (logs/ excluded)"
+  Write-Host "FAIL: git reset"
+  exit 1
 }
 
-$headSha = (git rev-parse HEAD 2>$null).Trim()
+git clean -fd -e logs/ 2>&1 | Out-Null
+
+$headSha = Get-GitSha "HEAD"
 Write-Host "HEAD = $headSha"
 Write-Host "OK: updated to origin/main"
 exit 10
