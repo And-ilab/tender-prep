@@ -51,15 +51,31 @@ function Read-EnvFilePaths {
   return @($paths)
 }
 
+function Remove-EnvUtf8Bom {
+  param([string]$EnvPath)
+  if (-not (Test-Path -LiteralPath $EnvPath)) { return }
+  $bytes = [System.IO.File]::ReadAllBytes($EnvPath)
+  if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+    Write-Host "Remove UTF-8 BOM from .env"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    $text = $utf8NoBom.GetString($bytes, 3, $bytes.Length - 3)
+    [System.IO.File]::WriteAllText($EnvPath, $text, $utf8NoBom)
+  }
+}
+
 Write-Host "=== repair-service-permissions ==="
-Grant-Read -Path (Join-Path $RepoRoot ".env") -Rights "R"
+$envFile = Join-Path $RepoRoot ".env"
+Remove-EnvUtf8Bom -EnvPath $envFile
+Grant-Read -Path $envFile -Rights "R"
 Grant-Read -Path $RepoRoot
+$logDir = Join-Path $RepoRoot "logs"
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+Grant-Read -Path $logDir -Rights "M"
 Grant-Read -Path $SecretsDir
 Grant-Read -Path (Join-Path $RepoRoot ".venv")
 Grant-Read -Path "C:\ProgramData\ms-playwright"
 Grant-Read -Path "C:\data\playwright-downloads" -Rights "M"
 
-$envFile = Join-Path $RepoRoot ".env"
 foreach ($p in (Read-EnvFilePaths -EnvPath $envFile)) {
   Grant-Read -Path $p -Rights "R"
 }

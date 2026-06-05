@@ -74,5 +74,5 @@ export async function ensureDocumentUploadTargets(
  */
 export function attachmentSlugForDocId(docId) {
   const t = getCanonicalTypeById(docId);
-  return t?.id ?? docId.replace(/[^a-z0-9_-]+/gi, "-").slice(0, 48) || "other";
+  return t?.id ?? (docId.replace(/[^a-z0-9_-]+/gi, "-").slice(0, 48) || "other");
 }

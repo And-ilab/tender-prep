@@ -38,8 +38,8 @@ function Stop-LenaWindowsService {
   $name = "tender-prep-lena"
   $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
   if (-not $svc) { return $false }
-  if ($svc.Status -eq "Running" -or $svc.Status -eq "StartPending") {
-    Write-Host "Stopping service $name..."
+  if ($svc.Status -in @("Running", "StartPending", "Paused", "PausePending")) {
+    Write-Host "Stopping service $name (status=$($svc.Status))..."
     Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
     for ($i = 0; $i -lt 15; $i++) {
       Start-Sleep -Milliseconds 400

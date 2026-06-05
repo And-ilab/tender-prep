@@ -28,7 +28,7 @@ function loadEnvFile() {
     if (!t || t.startsWith("#")) continue;
     const eq = t.indexOf("=");
     if (eq <= 0) continue;
-    const key = t.slice(0, eq).trim();
+    const key = t.slice(0, eq).trim().replace(/^\uFEFF/, "");
     let val = t.slice(eq + 1).trim();
     if (
       (val.startsWith('"') && val.endsWith('"')) ||

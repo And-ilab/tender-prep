@@ -14,6 +14,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$env:GIT_TERMINAL_PROMPT = "0"
+$env:GIT_OPTIONAL_LOCKS = "0"
 Set-Location $RepoRoot
 
 $logDir = Join-Path $RepoRoot "logs"
@@ -38,14 +40,35 @@ $deploySshDir = "C:\Users\deploy\.ssh"
 $deployGithubKey = Join-Path $deploySshDir "id_ed25519_github"
 $deployKnownHosts = Join-Path $deploySshDir "known_hosts"
 if (Test-Path $deployGithubKey) {
+  New-Item -ItemType Directory -Force -Path $deploySshDir | Out-Null
+  $hasGithubHost = $false
+  if (Test-Path $deployKnownHosts) {
+    $hasGithubHost = @(Get-Content -LiteralPath $deployKnownHosts -ErrorAction SilentlyContinue |
+      Where-Object { $_ -match "github\.com" }).Count -gt 0
+  }
+  if (-not $hasGithubHost) {
+    $scan = ssh-keyscan -t ed25519 github.com 2>$null
+    if ($scan) {
+      Add-Content -Path $deployKnownHosts -Value $scan -Encoding ASCII
+      Write-DeployLog "Added github.com to deploy known_hosts"
+    }
+  }
   $keyPosix = ($deployGithubKey -replace "\\", "/")
   $khPosix = ($deployKnownHosts -replace "\\", "/")
-  $env:GIT_SSH_COMMAND = "ssh -i `"$keyPosix`" -o IdentitiesOnly=yes -o UserKnownHostsFile=`"$khPosix`""
+  $env:GIT_SSH_COMMAND = "ssh -i `"$keyPosix`" -o IdentitiesOnly=yes -o UserKnownHostsFile=`"$khPosix`" -o StrictHostKeyChecking=accept-new"
   Write-DeployLog "GIT_SSH_COMMAND: deploy GitHub key"
 }
 
+$stopScript = Join-Path $PSScriptRoot "lena-bot-stop.ps1"
+Write-DeployLog "lena-bot-stop.ps1 (before git fetch)"
+& powershell -NoProfile -ExecutionPolicy Bypass -File $stopScript -RepoRoot $RepoRoot
+
 Write-DeployLog "git fetch origin $Branch"
-git fetch origin $Branch
+git -c gc.auto=0 -c maintenance.auto=false fetch origin $Branch
+if ($LASTEXITCODE -ne 0) {
+  Start-Sleep -Seconds 3
+  git -c gc.auto=0 -c maintenance.auto=false fetch origin $Branch
+}
 if ($LASTEXITCODE -ne 0) { throw "git fetch failed ($LASTEXITCODE)" }
 
 $remoteRef = "origin/$Branch"

@@ -25,10 +25,46 @@ $probeErr = Join-Path $logDir "probe-bot-start.err"
 $probeOut = Join-Path $logDir "probe-bot-start.out"
 Remove-Item $probeErr, $probeOut -ErrorAction SilentlyContinue
 
+function Test-EnvFileKeys {
+  param([string]$EnvPath)
+  $found = @{}
+  if (-not (Test-Path -LiteralPath $EnvPath)) {
+    Write-Host "WARN: .env not found at $EnvPath"
+    return $found
+  }
+  $bytes = [System.IO.File]::ReadAllBytes($EnvPath)
+  if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+    Write-Host "WARN: .env has UTF-8 BOM (service may miss TELEGRAM_BOT_TOKEN on first line)"
+  }
+  foreach ($line in Get-Content -LiteralPath $EnvPath -Encoding UTF8) {
+    $t = $line.Trim()
+    if (-not $t -or $t.StartsWith("#")) { continue }
+    $eq = $t.IndexOf("=")
+    if ($eq -le 0) { continue }
+    $key = $t.Substring(0, $eq).Trim().TrimStart([char]0xFEFF)
+    $val = $t.Substring($eq + 1).Trim().Trim('"').Trim("'")
+    if ($val) { $found[$key] = $true }
+  }
+  return $found
+}
+
 Write-Host "=== probe-bot-start ==="
 Write-Host "Node: $node"
 Write-Host "Bot:  $bot"
 Write-Host "CWD:  $RepoRoot"
+
+$envFile = Join-Path $RepoRoot ".env"
+$fromFile = Test-EnvFileKeys -EnvPath $envFile
+foreach ($k in @("TELEGRAM_BOT_TOKEN", "LENA_DRIVE_ROOT")) {
+  $inFile = $fromFile.ContainsKey($k)
+  $inProc = [bool]([Environment]::GetEnvironmentVariable($k, "Process"))
+  $inUser = [bool]([Environment]::GetEnvironmentVariable($k, "User"))
+  $inMachine = [bool]([Environment]::GetEnvironmentVariable($k, "Machine"))
+  Write-Host ("  {0}: .env={1} process={2} user={3} machine={4}" -f $k, $inFile, $inProc, $inUser, $inMachine)
+  if (-not $inFile -and ($inUser -or $inMachine)) {
+    Write-Host "  WARN: $k only in Windows env — LocalSystem service reads .env only"
+  }
+}
 
 $p = Start-Process -FilePath $node -ArgumentList @($bot) -WorkingDirectory $RepoRoot `
   -RedirectStandardError $probeErr -RedirectStandardOutput $probeOut -PassThru -WindowStyle Hidden

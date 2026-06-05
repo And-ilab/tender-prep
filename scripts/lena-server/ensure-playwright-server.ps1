@@ -58,7 +58,8 @@ function Set-EnvLine {
   } else {
     $raw = $raw.TrimEnd() + "`r`n$line`r`n"
   }
-  Set-Content -Path $File -Value $raw -Encoding UTF8 -NoNewline
+  $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+  [System.IO.File]::WriteAllText($File, $raw, $utf8NoBom)
 }
 
 $envFile = Join-Path $RepoRoot ".env"

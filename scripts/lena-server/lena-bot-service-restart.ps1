@@ -28,10 +28,29 @@ function Show-LogTail {
   Get-Content $Path -Tail $Lines -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
 }
 
+function Wait-LenaServiceStopped {
+  param([string]$ServiceName, [int]$MaxSec = 20)
+  for ($i = 0; $i -lt $MaxSec; $i++) {
+    Start-Sleep -Seconds 1
+    $s = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if (-not $s -or $s.Status -eq "Stopped") { return $true }
+  }
+  return $false
+}
+
 function Start-LenaServiceRobust {
   param([string]$ServiceName, [string]$NssmExe)
   $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
   if (-not $svc) { return $false }
+
+  if ($NssmExe) {
+    $nssmSt = (& $NssmExe status $ServiceName 2>&1 | Out-String).Trim()
+    if ($nssmSt -match "SERVICE_RUNNING|SERVICE_PAUSED") {
+      Write-Host "nssm stop $ServiceName (was $nssmSt) ..."
+      & $NssmExe stop $ServiceName 2>&1 | ForEach-Object { Write-Host $_ }
+      [void](Wait-LenaServiceStopped -ServiceName $ServiceName)
+    }
+  }
 
   if ($svc.Status -eq "Running") {
     try {
@@ -64,6 +83,9 @@ function Start-LenaServiceRobust {
   return $false
 }
 
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+icacls $logDir /grant "SYSTEM:(OI)(CI)M" 2>$null | Out-Null
+
 Write-Host "=== Stop lena-bot (service + stray node) ==="
 & powershell -NoProfile -ExecutionPolicy Bypass -File $stopScript -ClearWebhook -RepoRoot $RepoRoot
 if ($LASTEXITCODE -eq 2) {
@@ -83,6 +105,8 @@ if (-not $s) {
 
 $nssm = Find-Nssm
 if ($nssm) {
+  & $nssm set $name AppStdout $outLog 2>&1 | Out-Null
+  & $nssm set $name AppStderr $errLog 2>&1 | Out-Null
   $st = & $nssm status $name 2>&1
   Write-Host "nssm status before start: $st"
 }
@@ -104,6 +128,9 @@ if (-not $ok) {
   Write-Host ""
   Write-Host "Running probe-bot-start.ps1 ..."
   & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "probe-bot-start.ps1") -RepoRoot $RepoRoot
+  Write-Host ""
+  Write-Host "Running probe-bot-system.ps1 (LocalSystem) ..."
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "probe-bot-system.ps1") -RepoRoot $RepoRoot
   Write-Host ""
   Write-Host "Try: cd $RepoRoot\scripts\lena-server; .\install-service-nssm.ps1"
   Write-Host "Or: .\diagnose-windows.ps1"

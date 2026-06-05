@@ -48,6 +48,7 @@ if (-not $nssm -or -not (Test-Path $nssm)) {
 }
 
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+icacls $logDir /grant "SYSTEM:(OI)(CI)M" 2>$null | Out-Null
 
 $envFile = Join-Path $RepoRoot ".env"
 if (Test-Path $envFile) {
@@ -85,6 +86,7 @@ Write-Host "  CWD:    $RepoRoot"
 & $nssm set $ServiceName AppStderrCreationDisposition 4
 & $nssm set $ServiceName AppRotateFiles 1
 & $nssm set $ServiceName AppRotateBytes 10485760
+& $nssm set $ServiceName ObjectName LocalSystem
 
 & $nssm start $ServiceName
 Start-Sleep -Seconds 2
