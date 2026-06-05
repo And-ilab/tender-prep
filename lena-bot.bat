@@ -54,16 +54,21 @@ echo === SYSTEM permissions on .env and secrets ===
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\lena-server\repair-service-permissions.ps1" -RepoRoot "%CD%"
 
 echo === Restart Lena service ===
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\lena-server\lena-bot-service-restart.ps1" -RepoRoot "%CD%"
-set "EC=!ERRORLEVEL!"
+call :lena_service_restart
+set "LENA_RESTART_RC=!ERRORLEVEL!"
 echo.
-if "!EC!"=="0" (
+if !LENA_RESTART_RC! EQU 0 (
   echo Done.
 ) else (
-  echo [ERROR] exit code !EC!
+  echo [ERROR] service restart exit code !LENA_RESTART_RC!
+  echo Run: powershell -File scripts\lena-server\diagnose-bot-health.ps1
 )
 pause
-exit /b !EC!
+exit /b !LENA_RESTART_RC!
+
+:lena_service_restart
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\lena-server\lena-bot-service-restart.ps1" -RepoRoot "%CD%"
+exit /b %ERRORLEVEL%
 
 :lena_git_sync
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\lena-server\git-sync-main.ps1" -RepoRoot "%CD%" -SkipStop -AllowOfflineIfSynced
