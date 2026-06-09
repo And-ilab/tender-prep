@@ -39,6 +39,13 @@ describe("normalizeToCanonicalDocument", () => {
     const r = normalizeToCanonicalDocument("Заявление о соответствии");
     assert.equal(r.id, "compliance_statement");
   });
+
+  it("maps certificate of origin from non-CIS clause", () => {
+    const r = normalizeToCanonicalDocument(
+      "сертификат о происхождении товара для государств, не являющихся участниками СНГ",
+    );
+    assert.equal(r.id, "certificate_of_origin");
+  });
 });
 
 describe("isNonResidentOnlyRequirement", () => {

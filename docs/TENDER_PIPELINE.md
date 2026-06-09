@@ -41,7 +41,7 @@
 
 ## Checklist (4b)
 
-Эталонные типы документов — [`src/analysis/canonicalDocumentTypes.js`](../src/analysis/canonicalDocumentTypes.js) (21 тип). Нормализация и фильтры — [`src/analysis/documentChecklist.js`](../src/analysis/documentChecklist.js).
+Эталонные типы документов — [`src/analysis/canonicalDocumentTypes.js`](../src/analysis/canonicalDocumentTypes.js) (22 типа). Нормализация и фильтры — [`src/analysis/documentChecklist.js`](../src/analysis/documentChecklist.js).
 
 **Правила ветвления КД** (ГС Ритейл / Финсельват):
 
@@ -49,11 +49,14 @@
 |------------|-----------|-----------|
 | Резидент / нерезидент | Резидент РБ | Только документы **явной ветки резидента** (свидетельство о гос. регистрации и т.д.). **Не** выписка из торгового реестра |
 | Производитель / представитель | Не производитель | Только ветка **представителя** (дилерское/агентское соглашение). **Не** справка ТПП |
+| Товары не из СНГ | Поставка из Китая | Сертификат о происхождении — **если есть в п.3.2 КД** (извлечение LLM с цитатой) |
+| Состав КП | — | Условия оплаты, гарантия — **внутри КП**, не отдельные строки |
+| Референс / декларации | — | Только при **явном** названии в КД/ТЗ |
 | Документы из ТЗ | — | Конкретные названия из текста ТЗ, не абстрактная фраза |
 
 П. **3.2 КД** («Документы и сведения…»): каждый нумерованный подпункт = отдельная строка «К подаче».
 
-Новые типы (2026-06): `state_registration_certificate`, `dealer_representative_docs`, `conformity_declarations`, `compliance_statement`, `tz_compliance_table`.
+Новые типы (2026-06): `state_registration_certificate`, `dealer_representative_docs`, `certificate_of_origin`, `conformity_declarations`, `compliance_statement`, `tz_compliance_table`.
 
 Тесты нормализации: `npm test` → `src/analysis/` и `src/icetrade/` (в т.ч. `competitiveDocsProvision.test.mjs`).
 

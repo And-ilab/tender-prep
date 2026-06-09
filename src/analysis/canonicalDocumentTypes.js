@@ -139,7 +139,7 @@ export const CANONICAL_DOCUMENT_TYPES = [
   {
     id: "reference_list",
     title: "Референс-лист",
-    synonyms: ["референс", "опыт выполнен", "аналогичн"],
+    synonyms: ["референс-лист", "референс", "reference list", "опыт выполнен"],
     storage: "tender",
     preparedByDefault: "manager",
   },
@@ -170,6 +170,19 @@ export const CANONICAL_DOCUMENT_TYPES = [
       "полномочия представител",
       "производителя или официального",
       "статус производителя или официального",
+    ],
+    storage: "tender",
+    preparedByDefault: "manager",
+  },
+  {
+    id: "certificate_of_origin",
+    title: "Сертификат о происхождении товара",
+    synonyms: [
+      "сертификат о происхождении",
+      "происхождени товара",
+      "не являющихся участниками снг",
+      "содружества независимых государств",
+      "страна происхождения",
     ],
     storage: "tender",
     preparedByDefault: "manager",

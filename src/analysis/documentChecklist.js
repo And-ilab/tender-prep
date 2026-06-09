@@ -92,6 +92,50 @@ export function isExcludedParticipantRequirement(item) {
   return isNonResidentOnlyRequirement(item) || isManufacturerOnlyRequirement(item);
 }
 
+/** Документы, входящие в состав КП (раздел 2) — не отдельные строки «К подаче». */
+const KP_EMBEDDED_DOC_IDS = new Set(["payment_terms", "warranty_letter"]);
+
+/**
+ * @param {{ id: string }} doc
+ */
+export function isKpEmbeddedChecklistItem(doc) {
+  return KP_EMBEDDED_DOC_IDS.has(doc.id);
+}
+
+/**
+ * Референс-лист — только при явном названии документа в КД (не критерии «аналогичный опыт»).
+ * @param {{ name?: string, basis?: string, reason?: string, criteria?: string, evidence?: string }} item
+ */
+export function isExplicitReferenceListRequirement(item) {
+  const blob = requirementBlob(item);
+  return /референс|reference\s*list/i.test(blob);
+}
+
+/**
+ * Декларации соответствия — только при дословном упоминании в КД/ТЗ.
+ * @param {{ name?: string, basis?: string, reason?: string, criteria?: string, evidence?: string }} item
+ */
+export function isExplicitConformityDeclarationRequirement(item) {
+  const blob = requirementBlob(item);
+  return /декларац\S*\s+соответств/i.test(blob);
+}
+
+/**
+ * @param {{ name?: string, basis?: string, reason?: string, criteria?: string, evidence?: string }} item
+ * @param {ReturnType<typeof normalizeToCanonicalDocument>} normalized
+ */
+export function shouldIncludeChecklistItem(item, normalized) {
+  if (isKpEmbeddedChecklistItem(normalized)) return false;
+  if (normalized.id === "reference_list" && !isExplicitReferenceListRequirement(item)) return false;
+  if (
+    normalized.id === "conformity_declarations" &&
+    !isExplicitConformityDeclarationRequirement(item)
+  ) {
+    return false;
+  }
+  return true;
+}
+
 /**
  * @param {NormalizedDoc} doc
  */
@@ -151,6 +195,7 @@ function normalizeItemList(preparedBy, items) {
     const cleanName = stripRequirementParentheticals(x.name) || x.name;
     const n = normalizeToCanonicalDocument(cleanName);
     if (n.id === "egr_extract") continue;
+    if (!shouldIncludeChecklistItem(x, n)) continue;
     const key = n.id !== "other" ? n.id : `other:${n.rawName}`;
     const existing = map.get(key);
     const source = preparedBy;
