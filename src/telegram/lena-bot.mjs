@@ -1390,36 +1390,109 @@ async function sendDocumentChecklistStep1(chatId, chainReplyTo, result, pToken) 
  * @param {string} token
  */
 async function sendRefinedChecklistAfterOrgSelect(chatId, chainReplyTo, pending, token) {
+  // #region agent log
+  checklistDebug714167(
+    "lena-bot.mjs:sendRefinedChecklistAfterOrgSelect",
+    "org select handler start",
+    {
+      tenderId: pending.tenderId,
+      selected: pending.selected,
+      docCount: pending.requiredDocuments?.length ?? 0,
+    },
+    "H5",
+  );
+  // #endregion
   if (!pending.selected || !pending.analysisStructured || !pending.requiredDocuments) {
     await sendText(chatId, chainReplyTo, "Нет данных анализа — запустите «Анализ документов» снова.");
     return;
   }
   assertCredentialsFile();
   const orgLabel = OFFER_ORG[pending.selected].label;
-  const bundle = await buildRefinedChecklistTelegramBundle(
-    rootId,
-    pending.tenderId,
-    pending.selected,
-    orgLabel,
-    pending.analysisStructured,
-    pending.requiredDocuments,
-    pending.opts,
-    { corpus: pending.analysisHintsCorpus ?? "" },
-  );
-  pending.uploadLinks = bundle.uploadTargets;
-  pending.phase = "awaiting_manager_docs";
-  pending.ts = Date.now();
+  const stopPulse = startChatActionPulse(chatId);
+  try {
+    let bundle;
+    try {
+      bundle = await buildRefinedChecklistTelegramBundle(
+        rootId,
+        pending.tenderId,
+        pending.selected,
+        orgLabel,
+        pending.analysisStructured,
+        pending.requiredDocuments,
+        pending.opts,
+        { corpus: pending.analysisHintsCorpus ?? "" },
+      );
+    } catch (e) {
+      const err = e instanceof Error ? e.message : String(e);
+      // #region agent log
+      checklistDebug714167(
+        "lena-bot.mjs:sendRefinedChecklistAfterOrgSelect",
+        "buildRefinedChecklistTelegramBundle failed",
+        { tenderId: pending.tenderId, error: err.slice(0, 500) },
+        "H2",
+      );
+      // #endregion
+      await sendText(chatId, chainReplyTo, `Чеклист: ошибка — ${err.slice(0, 3500)}`);
+      return;
+    }
+    pending.uploadLinks = bundle.uploadTargets;
+    pending.phase = "awaiting_manager_docs";
+    pending.ts = Date.now();
 
-  const gateOn = !managerPriceGateDisabled();
-  const checklistOpts = { parseMode: /** @type {const} */ ("HTML") };
-  const checklistHtml = checklistMarkdownToTelegramHtml(bundle.text);
-  if (!gateOn && bundle.uploadTargets.length === 0) {
-    await sendTextChunks(chatId, chainReplyTo, checklistHtml, buildDocsDoneKeyboard(token), checklistOpts);
-    await handleManagerDocsDone(chatId, chainReplyTo, token, pending);
-    return;
+    const gateOn = !managerPriceGateDisabled();
+    const checklistOpts = { parseMode: /** @type {const} */ ("HTML") };
+    const checklistHtml = checklistMarkdownToTelegramHtml(bundle.text);
+    // #region agent log
+    checklistDebug714167(
+      "lena-bot.mjs:sendRefinedChecklistAfterOrgSelect",
+      "sending step2 telegram",
+      {
+        tenderId: pending.tenderId,
+        htmlLen: checklistHtml.length,
+        uploadTargetCount: bundle.uploadTargets.length,
+      },
+      "H3",
+    );
+    // #endregion
+    try {
+      if (!gateOn && bundle.uploadTargets.length === 0) {
+        await sendTextChunks(chatId, chainReplyTo, checklistHtml, buildDocsDoneKeyboard(token), checklistOpts);
+        await handleManagerDocsDone(chatId, chainReplyTo, token, pending);
+        // #region agent log
+        checklistDebug714167(
+          "lena-bot.mjs:sendRefinedChecklistAfterOrgSelect",
+          "step2 sent (auto docs done)",
+          { tenderId: pending.tenderId },
+          "H3",
+        );
+        // #endregion
+        return;
+      }
+
+      await sendTextChunks(chatId, chainReplyTo, checklistHtml, buildDocsDoneKeyboard(token), checklistOpts);
+      // #region agent log
+      checklistDebug714167(
+        "lena-bot.mjs:sendRefinedChecklistAfterOrgSelect",
+        "step2 sent",
+        { tenderId: pending.tenderId },
+        "H3",
+      );
+      // #endregion
+    } catch (e) {
+      const err = e instanceof Error ? e.message : String(e);
+      // #region agent log
+      checklistDebug714167(
+        "lena-bot.mjs:sendRefinedChecklistAfterOrgSelect",
+        "sendTextChunks failed",
+        { tenderId: pending.tenderId, error: err.slice(0, 500) },
+        "H3",
+      );
+      // #endregion
+      await sendText(chatId, chainReplyTo, `Не удалось отправить чеклист: ${err.slice(0, 3500)}`);
+    }
+  } finally {
+    stopPulse();
   }
-
-  await sendTextChunks(chatId, chainReplyTo, checklistHtml, buildDocsDoneKeyboard(token), checklistOpts);
 }
 
 /**
@@ -2060,6 +2133,14 @@ async function handleCallbackQuery(cq) {
       pending.ts = Date.now();
       const label = OFFER_ORG[pending.selected].label;
       await answerCallbackQuery(id, `Выбрано: ${label}`);
+      // #region agent log
+      checklistDebug714167(
+        "lena-bot.mjs:CB_PARSE_ORG_SELECT",
+        "org selected awaiting_org",
+        { token, tenderId: pending.tenderId, selected: pending.selected, orgIdx },
+        "H5",
+      );
+      // #endregion
       try {
         /** @type {Record<string, unknown>} */
         const rmBody = {

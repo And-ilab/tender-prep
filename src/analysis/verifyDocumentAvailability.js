@@ -5,12 +5,13 @@ import { ensureLenaTree, ensureTenderTree } from "../drive/workspace.js";
 import { normalizeToCanonicalDocument } from "./canonicalDocumentTypes.js";
 import { attachmentSlugForDocId } from "./ensureDocumentUploadTargets.js";
 import {
-  buildUploadedFilesIndex,
   computeLastReportingQuarterHint,
+  extractAndIdentifyDriveFile,
   findFileForCanonicalId,
   isReportingPeriodValid,
 } from "./identifyUploadedDocuments.js";
 import { fileMatchesCanonicalType, resolveDocumentFormSource } from "./resolveDocumentFormSource.js";
+import { checklistDebug714167 } from "../debug/checklistDebug714167.js";
 
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 
@@ -28,6 +29,24 @@ const FOLDER_MIME = "application/vnd.google-apps.folder";
  */
 
 const PERIODIC_ORG_IDS = new Set(["bank_reference", "balance_sheet", "income_statement"]);
+const ORG_INDEX_SCOPE = ["bank_reference", "balance_sheet", "income_statement", "reliability_letter"];
+
+/**
+ * @param {Map<string, import("./identifyUploadedDocuments.js").IdentifiedDocument>} index
+ * @param {{ id?: string, name?: string, mimeType?: string }} file
+ * @param {string[]} scopeIds
+ */
+async function ensureFileInIndex(index, file, scopeIds) {
+  const id = String(file.id ?? "");
+  if (!id) return undefined;
+  const cached = index.get(id);
+  if (cached) return cached;
+  const identified = await extractAndIdentifyDriveFile(id, String(file.name ?? ""), file.mimeType, {
+    scopeIds,
+  });
+  index.set(id, identified);
+  return identified;
+}
 const FORM_DRAFT_ORG_IDS = new Set(["reliability_letter"]);
 
 /**
@@ -288,7 +307,13 @@ async function verifyOrgDocument(doc, orgFiles, orgIndex, ctx) {
   if (!match) {
     return { status: "missing", ...base, note: "нет файла в lena/org-docs" };
   }
-  const identified = orgIndex.get(match.id);
+  let identified = orgIndex.get(match.id);
+  if (PERIODIC_ORG_IDS.has(doc.id) && !identified) {
+    const file = orgFiles.find((f) => String(f.id ?? "") === match.id);
+    if (file) {
+      identified = await ensureFileInIndex(orgIndex, file, ORG_INDEX_SCOPE);
+    }
+  }
 
   if (PERIODIC_ORG_IDS.has(doc.id)) {
     return verifyPeriodicOrgDocument(doc, match, identified, ctx);
@@ -381,7 +406,7 @@ export async function verifyDocumentItem(
     return verifyOrgFormDraftFallback(doc, userRootId, offerOrg, ctx);
   }
 
-  const { tender } = await ensureTenderTree(userRootId, tenderId, treeOpts);
+  const tender = ctx.tender ?? (await ensureTenderTree(userRootId, tenderId, treeOpts)).tender;
   const slug = attachmentSlugForDocId(doc.id);
   const folderId = tender.attachmentsId ? await findChildFolderId(tender.attachmentsId, slug) : null;
   const files = folderId ? await listChildren(folderId) : [];
@@ -422,19 +447,31 @@ export async function verifyDocumentsForChecklist(
     ? await listCompanySubfolderFiles(layout.foundingDocsId, offerOrg)
     : [];
 
-  const orgIndex = await buildUploadedFilesIndex(orgFiles, {
-    scopeIds: ["bank_reference", "balance_sheet", "income_statement", "reliability_letter"],
-  });
-  const foundingIndex = await buildUploadedFilesIndex(foundingFiles, {
-    scopeIds: ["charter", "state_registration_certificate", "founding_documents", "egr_extract"],
-    maxFiles: 25,
-  });
+  // #region agent log
+  checklistDebug714167(
+    "verifyDocumentAvailability.js:verifyDocumentsForChecklist",
+    "drive file lists loaded",
+    {
+      tenderId,
+      offerOrg,
+      orgFileCount: orgFiles.length,
+      foundingFileCount: foundingFiles.length,
+    },
+    "H1",
+  );
+  // #endregion
+
+  const { tender } = await ensureTenderTree(userRootId, tenderId, treeOpts);
 
   let inputFiles = opts.inputFiles;
   if (!inputFiles?.length) {
-    const { tender } = await ensureTenderTree(userRootId, tenderId, treeOpts);
     inputFiles = await listChildren(tender.inputsId);
   }
+
+  /** @type {Map<string, import("./identifyUploadedDocuments.js").IdentifiedDocument>} */
+  const orgIndex = new Map();
+  /** @type {Map<string, import("./identifyUploadedDocuments.js").IdentifiedDocument>} */
+  const foundingIndex = new Map();
 
   const ctx = {
     orgFiles,
@@ -442,6 +479,7 @@ export async function verifyDocumentsForChecklist(
     orgIndex,
     foundingIndex,
     inputFiles,
+    tender,
     corpus: opts.corpus ?? "",
     bankReferenceDateRule: structured.bankReferenceDateRule ?? null,
     balanceSheetPeriodRule: structured.balanceSheetPeriodRule ?? null,
@@ -451,6 +489,7 @@ export async function verifyDocumentsForChecklist(
 
   /** @type {{ doc: import("./documentChecklist.js").NormalizedDoc, verify: DocumentVerifyResult }[]} */
   const out = [];
+  const tVerify = Date.now();
   for (const doc of requiredDocuments) {
     const lenaPrepares = isLenaPreparedChecklistItem(doc, structured);
     const pickTemplateStrategy =
@@ -461,6 +500,19 @@ export async function verifyDocumentsForChecklist(
     });
     out.push({ doc, verify });
   }
+  // #region agent log
+  checklistDebug714167(
+    "verifyDocumentAvailability.js:verifyDocumentsForChecklist",
+    "verify loop done",
+    {
+      tenderId,
+      docCount: out.length,
+      orgIndexSize: orgIndex.size,
+      ms: Date.now() - tVerify,
+    },
+    "H1",
+  );
+  // #endregion
   return out;
 }
 

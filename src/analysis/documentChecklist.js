@@ -17,6 +17,7 @@ import {
   shouldShowInLenaPrepareBlock,
   verifyDocumentsForChecklist,
 } from "./verifyDocumentAvailability.js";
+import { checklistDebug714167 } from "../debug/checklistDebug714167.js";
 
 /**
  * @typedef {Object} QualificationRequirement
@@ -1128,6 +1129,15 @@ export async function buildRefinedChecklistTelegramBundle(
   treeOpts,
   bundleOpts = {},
 ) {
+  const t0 = Date.now();
+  // #region agent log
+  checklistDebug714167(
+    "documentChecklist.js:buildRefinedChecklistTelegramBundle",
+    "step2 bundle start",
+    { tenderId, offerOrg, docCount: requiredDocuments.length },
+    "H1",
+  );
+  // #endregion
   const verifyResults = await verifyDocumentsForChecklist(
     userRootId,
     tenderId,
@@ -1141,6 +1151,14 @@ export async function buildRefinedChecklistTelegramBundle(
       corpus: bundleOpts.corpus ?? "",
     },
   );
+  // #region agent log
+  checklistDebug714167(
+    "documentChecklist.js:buildRefinedChecklistTelegramBundle",
+    "verifyDocumentsForChecklist done",
+    { tenderId, offerOrg, ms: Date.now() - t0, verifyCount: verifyResults.length },
+    "H1",
+  );
+  // #endregion
 
   const needUploadDocs = verifyResults
     .filter(({ doc, verify }) => {
@@ -1157,6 +1175,14 @@ export async function buildRefinedChecklistTelegramBundle(
     needUploadDocs.map((d) => ({ id: d.id, title: d.title, storage: d.storage })),
     treeOpts,
   );
+  // #region agent log
+  checklistDebug714167(
+    "documentChecklist.js:buildRefinedChecklistTelegramBundle",
+    "ensureDocumentUploadTargets done",
+    { tenderId, uploadTargetCount: uploadTargets.length, ms: Date.now() - t0 },
+    "H4",
+  );
+  // #endregion
 
   let inputFiles = bundleOpts.inputFiles;
   if (!inputFiles?.length) {
@@ -1191,5 +1217,13 @@ export async function buildRefinedChecklistTelegramBundle(
     uploadTargets,
     formHints,
   );
+  // #region agent log
+  checklistDebug714167(
+    "documentChecklist.js:buildRefinedChecklistTelegramBundle",
+    "step2 bundle done",
+    { tenderId, textLen: text.length, ms: Date.now() - t0 },
+    "H1",
+  );
+  // #endregion
   return { text, lenaPrepare, managerUpload, uploadTargets, formHints, verifyResults };
 }
