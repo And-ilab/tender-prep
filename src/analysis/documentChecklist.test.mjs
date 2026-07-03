@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildRequiredDocumentsList,
   corpusMentionsCommercialProposal,
+  corpusMentionsParticipantProposal,
   corpusRequiresNonCisOriginCertificate,
   filterPreOrgChecklistDocuments,
   formatDocumentCompositionStep1Telegram,
@@ -329,6 +330,25 @@ describe("buildRequiredDocumentsList", () => {
     );
     assert.ok(list.some((d) => d.id === "commercial_proposal"));
   });
+
+  it("adds commercial proposal when corpus mentions participant proposal", () => {
+    const corpus =
+      "Требования к форме и содержанию предложения участника процедуры закупки и сроку его действия";
+    assert.equal(corpusMentionsParticipantProposal(corpus), true);
+    const list = buildRequiredDocumentsList(
+      {
+        tenderTitle: null,
+        sumOrBudget: null,
+        submissionOverview: null,
+        submissionMethod: null,
+        submissionDeadline: null,
+        lenaCanPrepare: [{ name: "Техническое предложение", basis: "п.2" }],
+        managerMustProvide: [],
+      },
+      { corpus },
+    );
+    assert.ok(list.some((d) => d.id === "commercial_proposal"));
+  });
 });
 
 describe("formatQualificationRequirementsTelegram", () => {
@@ -435,7 +455,7 @@ describe("formatQualificationRequirementsTelegram", () => {
     assert.equal(split.length, 2);
   });
 
-  it("1352058 step1 excludes qual-proof docs from Кроме того к подаче", () => {
+  it("1352058 step1 excludes qual-proof docs from package section", () => {
     const cp = { ...normalizeToCanonicalDocument("Коммерческое предложение"), source: "lena" };
     const reg = {
       ...normalizeToCanonicalDocument("Свидетельство о государственной регистрации"),
@@ -485,7 +505,8 @@ describe("formatQualificationRequirementsTelegram", () => {
     assert.equal(documentCoveredByQualificationProof(resume, collectQualificationProofLabels(structured)), true);
     assert.equal(filterStep1SubmissionDocuments(required, structured).length, 4);
     const text = formatDocumentCompositionStep1Telegram(structured, required, undefined);
-    assert.match(text, /Кроме того к подаче/);
+    assert.match(text, /Кроме того пакет должен содержать/);
+    assert.match(text, /Предложение — обязательный документ пакета/);
     assert.match(text, /Коммерческое предложение/);
     assert.match(text, /Свидетельство о государственной регистрации/);
     assert.doesNotMatch(text, /К подаче:/);
@@ -568,7 +589,7 @@ describe("pre-org checklist filtering", () => {
     assert.equal(filtered[0].id, "technical_proposal");
   });
 
-  it("step 1 shows Кроме того к подаче including org-bound documents", () => {
+  it("step 1 shows package section including org-bound documents", () => {
     const bank = { ...normalizeToCanonicalDocument("Справка из банка"), source: "manager" };
     const text = formatDocumentCompositionStep1Telegram(
       {
@@ -591,7 +612,7 @@ describe("pre-org checklist filtering", () => {
       undefined,
     );
     assert.match(text, /Требования к квалификации/);
-    assert.match(text, /Кроме того к подаче/);
+    assert.match(text, /Кроме того пакет должен содержать/);
     assert.match(text, /Справка из банка/);
     assert.match(text, /не ранее 1-го числа/i);
     assert.match(text, /после выбора.*участника/i);

@@ -316,6 +316,20 @@ export function corpusMentionsCommercialProposal(corpus) {
 }
 
 /**
+ * В КД явно требуется «предложение участника» / ценовое предложение (не только коммерческое).
+ * @param {string} corpus
+ */
+export function corpusMentionsParticipantProposal(corpus) {
+  const c = String(corpus ?? "");
+  return (
+    /предложени[а-яё]*\s+участник/i.test(c) ||
+    /форм[а-яё]*\s+и\s+содержан[а-яё]*\s+предложени[а-яё]*\s+участник/i.test(c) ||
+    /запрос\s+ценов[а-яё]*\s+предложен/i.test(c) ||
+    /ценов[а-яё]*\s+предложен/i.test(c)
+  );
+}
+
+/**
  * В корпусе inputs есть ветка п.3.2 про сертификат о происхождении для товаров не из СНГ.
  * @param {string} corpus
  */
@@ -468,8 +482,17 @@ export function buildRequiredDocumentsList(structured, opts = {}) {
   }
   let list = sortSubmissionDocuments([...all.values()]);
   const corpus = opts.corpus?.trim();
-  const hasCp = list.some((d) => d.id === "commercial_proposal");
-  if (!hasCp && corpus && corpusMentionsCommercialProposal(corpus)) {
+  const hasProposalDoc = list.some(
+    (d) =>
+      d.id === "commercial_proposal" ||
+      d.id === "application_form" ||
+      (d.id === "other" && /предложени|ценов[а-яё]*\s+предложен/i.test(d.rawName ?? "")),
+  );
+  if (
+    !hasProposalDoc &&
+    corpus &&
+    (corpusMentionsCommercialProposal(corpus) || corpusMentionsParticipantProposal(corpus))
+  ) {
     list = sortSubmissionDocuments([
       { ...normalizeToCanonicalDocument("Коммерческое предложение"), source: "lena" },
       ...list,
@@ -770,7 +793,26 @@ export function documentCoveredByQualificationProof(doc, proofLabels) {
 }
 
 /**
- * Список «Кроме того к подаче» — без документов, уже перечисленных в квалификации.
+ * Заголовок блока документов пакета на шаге 1 (Telegram).
+ */
+export const PACKAGE_SECTION_HEADER = "**Кроме того пакет должен содержать:**";
+
+/**
+ * @param {NormalizedDoc[]} step1Documents
+ */
+export function formatPackageSectionIntro(step1Documents) {
+  const hasProposal = step1Documents.some(
+    (d) =>
+      d.id === "commercial_proposal" ||
+      d.id === "application_form" ||
+      /предложени|ценов[а-яё]*\s+предложен/i.test(submissionDisplayTitle(d)),
+  );
+  if (!hasProposal) return "";
+  return "_Предложение — обязательный документ пакета (по форме из КД, если указана). Не путать с названием всего «пакета подаваемых документов»._";
+}
+
+/**
+ * Список «Кроме того пакет должен содержать» — без документов, уже перечисленных в квалификации.
  * @param {NormalizedDoc[]} requiredDocuments
  * @param {AnalysisStructured} structured
  */
@@ -964,7 +1006,12 @@ export function formatDocumentCompositionStep1Telegram(
   // #endregion
 
   if (step1Documents.length) {
-    lines.push("**Кроме того к подаче:**");
+    lines.push(PACKAGE_SECTION_HEADER);
+    const packageIntro = formatPackageSectionIntro(step1Documents);
+    if (packageIntro) {
+      lines.push(packageIntro);
+      lines.push("");
+    }
     for (const d of step1Documents) {
       let line = `- ${submissionDisplayTitle(d)}`;
       const periodHint = orgDocPeriodHintForStep1(structured, d.id);
@@ -977,8 +1024,8 @@ export function formatDocumentCompositionStep1Telegram(
     lines.push("_После выбора участника — проверка наличия документов организации на Drive._");
     lines.push("");
   } else if (qualBlock) {
-    lines.push("**Кроме того к подаче:**");
-    lines.push("- _(дополнительных документов к подаче вне квалификации не выделено)_");
+    lines.push(PACKAGE_SECTION_HEADER);
+    lines.push("- _(дополнительных документов пакета вне квалификации не выделено)_");
     lines.push("");
     lines.push("_После выбора участника — проверка наличия документов организации на Drive._");
     lines.push("");
