@@ -506,7 +506,6 @@ describe("formatQualificationRequirementsTelegram", () => {
     assert.equal(filterStep1SubmissionDocuments(required, structured).length, 4);
     const text = formatDocumentCompositionStep1Telegram(structured, required, undefined);
     assert.match(text, /Кроме того пакет должен содержать/);
-    assert.match(text, /Предложение — обязательный документ пакета/);
     assert.match(text, /Коммерческое предложение/);
     assert.match(text, /Свидетельство о государственной регистрации/);
     assert.doesNotMatch(text, /К подаче:/);

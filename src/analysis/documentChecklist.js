@@ -798,20 +798,6 @@ export function documentCoveredByQualificationProof(doc, proofLabels) {
 export const PACKAGE_SECTION_HEADER = "**Кроме того пакет должен содержать:**";
 
 /**
- * @param {NormalizedDoc[]} step1Documents
- */
-export function formatPackageSectionIntro(step1Documents) {
-  const hasProposal = step1Documents.some(
-    (d) =>
-      d.id === "commercial_proposal" ||
-      d.id === "application_form" ||
-      /предложени|ценов[а-яё]*\s+предложен/i.test(submissionDisplayTitle(d)),
-  );
-  if (!hasProposal) return "";
-  return "_Предложение — обязательный документ пакета (по форме из КД, если указана). Не путать с названием всего «пакета подаваемых документов»._";
-}
-
-/**
  * Список «Кроме того пакет должен содержать» — без документов, уже перечисленных в квалификации.
  * @param {NormalizedDoc[]} requiredDocuments
  * @param {AnalysisStructured} structured
@@ -1007,11 +993,6 @@ export function formatDocumentCompositionStep1Telegram(
 
   if (step1Documents.length) {
     lines.push(PACKAGE_SECTION_HEADER);
-    const packageIntro = formatPackageSectionIntro(step1Documents);
-    if (packageIntro) {
-      lines.push(packageIntro);
-      lines.push("");
-    }
     for (const d of step1Documents) {
       let line = `- ${submissionDisplayTitle(d)}`;
       const periodHint = orgDocPeriodHintForStep1(structured, d.id);

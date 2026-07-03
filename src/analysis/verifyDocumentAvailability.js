@@ -286,7 +286,7 @@ async function verifyOrgDocument(doc, orgFiles, orgIndex, ctx) {
   const match =
     findFileForCanonicalId(orgFiles, orgIndex, doc.id) ?? findMatchingDriveFile(orgFiles, doc.id);
   if (!match) {
-    return { status: "missing", ...base, note: "нет файла в _lena/org-docs" };
+    return { status: "missing", ...base, note: "нет файла в lena/org-docs" };
   }
   const identified = orgIndex.get(match.id);
 
@@ -327,13 +327,13 @@ async function verifyOrgFormDraftFallback(doc, userRootId, offerOrg, ctx) {
       ...base,
       fileName: form.fileName,
       webViewLink: form.webViewLink,
-      note: "образец org в _lena/templates",
+      note: "образец org в lena/templates",
     };
   }
   return {
     status: "lena_draft",
     ...base,
-    note: "нужна форма в inputs или образец в _lena/templates",
+    note: "нужна форма в inputs или образец в lena/templates",
   };
 }
 
@@ -371,7 +371,7 @@ export async function verifyDocumentItem(
       findFileForCanonicalId(ctx.foundingFiles, ctx.foundingIndex, doc.id) ??
       findMatchingDriveFile(ctx.foundingFiles, doc.id);
     if (!match) {
-      return { status: "missing", ...base, note: "нет файла в _lena/founding-docs" };
+      return { status: "missing", ...base, note: "нет файла в lena/founding-docs" };
     }
     const { webViewLink } = await fileMetaLink(match.id);
     return { status: "found_founding", ...base, fileName: match.name, webViewLink };

@@ -1,5 +1,5 @@
 import { ensureChildFolder } from "../drive/folders.js";
-import { getMetadata } from "../drive/ops.js";
+import { driveFolderWebLink } from "../drive/ops.js";
 import { ensureLenaTree, ensureTenderTree } from "../drive/workspace.js";
 import { lenaCompanyFolderName } from "../drive/layoutConstants.js";
 import { getCanonicalTypeById } from "./canonicalDocumentTypes.js";
@@ -55,8 +55,7 @@ export async function ensureDocumentUploadTargets(
 
     if (!folderId) continue;
 
-    const meta = await getMetadata(folderId);
-    const link = meta.webViewLink ?? `https://drive.google.com/drive/folders/${folderId}`;
+    const link = driveFolderWebLink(folderId);
     out.set(doc.id, {
       docId: doc.id,
       title: doc.title,

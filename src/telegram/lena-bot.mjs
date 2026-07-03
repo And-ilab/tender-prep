@@ -1168,12 +1168,17 @@ function stripAssistantMarkdownForTelegram(text) {
  * @param {string} text
  */
 function checklistMarkdownToTelegramHtml(text) {
-  return String(text ?? "")
+  let s = String(text ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
-    .replace(/_([^_\n]+)_/g, "<i>$1</i>");
+    .replace(/>/g, "&gt;");
+  s = s.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_m, label, url) => {
+    const safeUrl = url.replace(/&/g, "&amp;");
+    return `<a href="${safeUrl}">${label}</a>`;
+  });
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+  s = s.replace(/_([^_\n]+)_/g, "<i>$1</i>");
+  return s;
 }
 
 /**

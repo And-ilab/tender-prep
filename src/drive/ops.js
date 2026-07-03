@@ -35,6 +35,13 @@ export async function listChildren(folderId) {
 }
 
 /**
+ * @param {string} folderId
+ */
+export function driveFolderWebLink(folderId) {
+  return `https://drive.google.com/drive/folders/${folderId}`;
+}
+
+/**
  * @param {string} fileId
  */
 export async function getMetadata(fileId) {
