@@ -1340,6 +1340,19 @@ async function sendDocumentChecklistStep1(chatId, chainReplyTo, result, pToken) 
   });
 
   await sendTextChunks(chatId, chainReplyTo, result.step1Text, buildOrgSelectKeyboard(pToken));
+  // #region agent log
+  checklistDebug714167(
+    "lena-bot.mjs:sendDocumentChecklistStep1",
+    "telegram step1 sent",
+    {
+      tenderId: result.tenderId,
+      version: tenderPrepVersion(),
+      step1Preview: result.step1Text.slice(0, 400),
+      requiredIds: result.requiredDocuments.map((d) => d.id),
+    },
+    "H1-H5",
+  );
+  // #endregion
 }
 
 /**

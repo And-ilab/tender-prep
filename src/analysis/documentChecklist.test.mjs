@@ -7,6 +7,7 @@ import {
   filterPreOrgChecklistDocuments,
   formatDocumentCompositionStep1Telegram,
   formatQualificationRequirementsTelegram,
+  relocateQualificationMislabels,
   isExplicitComplianceStatementRequirement,
   isExplicitConformityDeclarationRequirement,
   isExplicitDealerRepresentativeRequirement,
@@ -95,6 +96,31 @@ describe("shouldIncludeChecklistItem", () => {
         {
           name: "Референс-лист",
           evidence: "дилерское соглашение, уполномочивающее на реализацию товара",
+        },
+        n,
+      ),
+      false,
+    );
+  });
+
+  it("excludes reference list when KD offers contracts as alternative (1352058-like)", () => {
+    const n = normalizeToCanonicalDocument("Референс-лист");
+    assert.equal(
+      shouldIncludeChecklistItem(
+        {
+          name: "Референс-лист",
+          evidence:
+            "референс-лист или копии договоров и актов выполненных работ стоимостью не менее 180000",
+        },
+        n,
+      ),
+      false,
+    );
+    assert.equal(
+      shouldIncludeChecklistItem(
+        {
+          name: "Референс-лист",
+          evidence: "не менее 3 проектов с договорами и актами выполненных работ",
         },
         n,
       ),
@@ -298,6 +324,33 @@ describe("buildRequiredDocumentsList", () => {
 });
 
 describe("formatQualificationRequirementsTelegram", () => {
+  it("relocateQualificationMislabels moves mislabeled reference list to qualification", () => {
+    const structured = relocateQualificationMislabels({
+      tenderTitle: null,
+      sumOrBudget: null,
+      submissionOverview: null,
+      submissionMethod: null,
+      submissionDeadline: null,
+      qualificationRequirements: [],
+      lenaCanPrepare: [],
+      managerMustProvide: [
+        {
+          name: "Референс-лист",
+          reason: "подтверждение квалификации",
+          criteria: "—",
+          evidence:
+            "не менее 3 проектов с договорами и актами выполненных работ стоимостью не менее 180000",
+        },
+      ],
+    });
+    assert.equal(structured.managerMustProvide.length, 0);
+    assert.equal(structured.qualificationRequirements.length, 1);
+    const list = buildRequiredDocumentsList(structured, {});
+    assert.ok(!list.some((d) => d.id === "reference_list"));
+    const text = formatQualificationRequirementsTelegram(structured);
+    assert.match(text, /180000|180 000/);
+  });
+
   it("renders 1352058-like qualification summaries without reference list title", () => {
     const structured = {
       tenderTitle: null,

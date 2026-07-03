@@ -10,6 +10,7 @@ import {
   buildRequiredDocumentsList,
   formatDocumentCompositionStep1Telegram,
 } from "../analysis/documentChecklist.js";
+import { checklistDebug714167 } from "../debug/checklistDebug714167.js";
 
 /**
  * Сводка результата extract (для Telegram / оркестрации).
@@ -98,6 +99,26 @@ export async function runTenderInputsExtractForTelegram(p) {
     requiredDocuments,
     inputsFolderWebViewLink,
   );
+  // #region agent log
+  checklistDebug714167(
+    "tenderInputsParseFlow.js:step1",
+    "buildRequiredDocumentsList result",
+    {
+      tenderId,
+      corpusChars: corpus?.length ?? 0,
+      qualCount: ar.structured.qualificationRequirements?.length ?? 0,
+      lenaCount: ar.structured.lenaCanPrepare?.length ?? 0,
+      mgrCount: ar.structured.managerMustProvide?.length ?? 0,
+      requiredIds: requiredDocuments.map((d) => d.id),
+      requiredTitles: requiredDocuments.map((d) => d.title),
+      strictGrounding: (() => {
+        const v = process.env.LENA_ICETRADE_ANALYZE_STRICT_GROUNDING?.trim().toLowerCase() ?? "";
+        return v !== "0" && v !== "false" && v !== "no" && v !== "off";
+      })(),
+    },
+    "H2-H4",
+  );
+  // #endregion
   return {
     ok: true,
     tenderId,

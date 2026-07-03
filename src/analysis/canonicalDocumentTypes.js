@@ -146,7 +146,7 @@ export const CANONICAL_DOCUMENT_TYPES = [
   {
     id: "reference_list",
     title: "Референс-лист",
-    synonyms: ["референс-лист", "референс", "reference list"],
+    synonyms: ["референс-лист", "reference list"],
     storage: "tender",
     preparedByDefault: "manager",
   },

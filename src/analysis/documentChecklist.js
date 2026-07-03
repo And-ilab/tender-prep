@@ -142,8 +142,70 @@ export function isKpEmbeddedChecklistItem(doc) {
  */
 export function isExplicitReferenceListRequirement(item) {
   const evidence = String(item.evidence ?? "").trim();
+  const name = String(item.name ?? item.reason ?? "").trim();
   if (!evidence) return false;
-  return /референс[-\s]?лист|reference\s+list/i.test(evidence);
+  if (!/референс[-\s]?лист|reference\s+list/i.test(evidence)) return false;
+  const blob = `${name}\n${evidence}`.trim();
+  // «референс-лист или договоры/акты» — альтернатива, не отдельный обязательный документ
+  if (
+    /референс[-\s]?лист\s+(?:и\s+)?(?:или|либо)/i.test(blob) ||
+    /(?:или|либо)\s+референс[-\s]?лист/i.test(blob) ||
+    /(?:договор\w*|акт\w*)\s+(?:и\s+)?(?:или|либо)\s+.*референс/i.test(blob) ||
+    /референс[-\s]?лист\s+(?:и\s+)?(?:или|либо)\s+.*(?:договор|акт)/i.test(blob)
+  ) {
+    return false;
+  }
+  // Опыт/квалификация через договоры и акты — не отдельный «референс-лист» в «К подаче»
+  if (
+    /(?:не\s+менее|квалификац|опыт\s+работ|договор\w*\s+.*акт)/i.test(blob) &&
+    !/(?:отдельн\w*|самостоятельн\w*)\s+.*референс|предоставить\s+референс[-\s]?лист/i.test(blob)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Критерии квалификации, ошибочно попавшие в managerMustProvide как «референс-лист» и т.п.
+ * @param {{ name?: string, reason?: string, criteria?: string, evidence?: string }} item
+ */
+export function looksLikeQualificationCriteriaItem(item) {
+  const blob = `${item.name ?? ""} ${item.reason ?? ""} ${item.criteria ?? ""} ${item.evidence ?? ""}`;
+  return /не\s+менее|квалификац|опыт\s+работ|договор\w*.*акт|акт\w*.*выполнен/i.test(blob);
+}
+
+/**
+ * @param {AnalysisStructured} structured
+ * @returns {AnalysisStructured}
+ */
+export function relocateQualificationMislabels(structured) {
+  /** @type {QualificationRequirement[]} */
+  const qualificationRequirements = [...(structured.qualificationRequirements ?? [])];
+  /** @type {AnalysisStructured["managerMustProvide"]} */
+  const managerMustProvide = [];
+
+  for (const x of structured.managerMustProvide ?? []) {
+    const n = normalizeToCanonicalDocument(stripRequirementParentheticals(x.name) || x.name);
+    if (
+      (n.id === "reference_list" || (n.id === "other" && looksLikeQualificationCriteriaItem(x))) &&
+      looksLikeQualificationCriteriaItem(x) &&
+      !isExplicitReferenceListRequirement(x)
+    ) {
+      const summary =
+        (x.evidence?.trim() && x.evidence.trim().length > 20 ? x.evidence.trim() : null) ||
+        (x.criteria && x.criteria !== "—" ? x.criteria : null) ||
+        x.reason ||
+        x.name;
+      qualificationRequirements.push({
+        summary,
+        evidence: x.evidence || summary,
+      });
+      continue;
+    }
+    managerMustProvide.push(x);
+  }
+
+  return { ...structured, qualificationRequirements, managerMustProvide };
 }
 
 /**
@@ -302,6 +364,16 @@ export function uploadTargetDisplayTitle(docId, title) {
  * @returns {AnalysisStructured}
  */
 export function applyCanonicalNamesToStructured(structured) {
+  const mapItems = (items) =>
+    items
+      .filter((x) => !isExcludedParticipantRequirement(x))
+      .map((x) => {
+        const n = normalizeToCanonicalDocument(stripRequirementParentheticals(x.name) || x.name);
+        return { ...x, name: n.title, _normalized: n };
+      })
+      .filter((x) => shouldIncludeChecklistItem(x, x._normalized))
+      .map(({ _normalized, ...x }) => x);
+
   return {
     ...structured,
     qualificationRequirements: structured.qualificationRequirements ?? [],
@@ -309,18 +381,8 @@ export function applyCanonicalNamesToStructured(structured) {
     balanceSheetPeriodRule: structured.balanceSheetPeriodRule ?? null,
     incomeStatementPeriodRule: structured.incomeStatementPeriodRule ?? null,
     cpCompositionRequirements: structured.cpCompositionRequirements ?? [],
-    lenaCanPrepare: structured.lenaCanPrepare
-      .filter((x) => !isExcludedParticipantRequirement(x))
-      .map((x) => {
-        const n = normalizeToCanonicalDocument(stripRequirementParentheticals(x.name) || x.name);
-        return { ...x, name: n.title };
-      }),
-    managerMustProvide: structured.managerMustProvide
-      .filter((x) => !isExcludedParticipantRequirement(x))
-      .map((x) => {
-        const n = normalizeToCanonicalDocument(stripRequirementParentheticals(x.name) || x.name);
-        return { ...x, name: n.title };
-      }),
+    lenaCanPrepare: mapItems(structured.lenaCanPrepare),
+    managerMustProvide: mapItems(structured.managerMustProvide),
   };
 }
 

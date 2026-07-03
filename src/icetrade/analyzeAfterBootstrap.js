@@ -33,9 +33,11 @@ import {
   isNonResidentOnlyRequirement,
   shouldIncludeChecklistItem,
   stripRequirementParentheticals,
+  relocateQualificationMislabels,
 } from "../analysis/documentChecklist.js";
 import { computeBankReferenceMaxDateIso } from "../analysis/verifyDocumentAvailability.js";
 import { computeLastReportingQuarterHint } from "../analysis/identifyUploadedDocuments.js";
+import { checklistDebug714167, checklistDebug714167UploadNotes } from "../debug/checklistDebug714167.js";
 import {
   canonicalTitlesForAnalysisPrompt,
   normalizeToCanonicalDocument,
@@ -439,6 +441,7 @@ function filterOrgPeriodRule(rule, corpus) {
  * @param {ReturnType<typeof normalizeAnalysis>} structured
  */
 function enrichOrgDocPeriodFields(structured) {
+  structured = relocateQualificationMislabels(structured);
   let bankReferenceDateRule = structured.bankReferenceDateRule;
   let balanceSheetPeriodRule = structured.balanceSheetPeriodRule ?? null;
   let incomeStatementPeriodRule = structured.incomeStatementPeriodRule ?? null;
@@ -965,6 +968,28 @@ export async function analyzeTenderAfterBootstrap(userRootId, tenderId, opts = {
     );
     const parsed = parseLlmJson(rawLlm);
     structured = applyCanonicalNamesToStructured(applyStrictCorpusGrounding(parsed, corpus));
+    // #region agent log
+    checklistDebug714167(
+      "analyzeAfterBootstrap.js:afterGrounding",
+      "structured matrix after grounding",
+      {
+        tenderId,
+        corpusChars: corpus.length,
+        llmMgrBefore: (Array.isArray(parsed.managerMustProvide) ? parsed.managerMustProvide : []).map(
+          (x) => ({
+            name: typeof x?.name === "string" ? x.name : "",
+            ev: String(x?.evidence ?? "").slice(0, 60),
+          }),
+        ),
+        mgrAfter: structured.managerMustProvide.map((x) => ({
+          name: x.name,
+          ev: String(x.evidence ?? "").slice(0, 60),
+        })),
+        lenaAfter: structured.lenaCanPrepare.map((x) => x.name),
+      },
+      "H2-H3",
+    );
+    // #endregion
   } catch (e) {
     return {
       ok: false,
@@ -1020,6 +1045,22 @@ export async function analyzeTenderAfterBootstrap(userRootId, tenderId, opts = {
   } finally {
     await rm(tmp, { recursive: true, force: true }).catch(() => {});
   }
+
+  const requiredPreview = buildRequiredDocumentsList(structured, { corpus });
+  await checklistDebug714167UploadNotes(notesId, {
+    tenderId,
+    corpusChars: corpus.length,
+    usedParsedPipeline,
+    notParsedFiles,
+    qualificationCount: structured.qualificationRequirements?.length ?? 0,
+    lenaNames: structured.lenaCanPrepare.map((x) => x.name),
+    mgrNames: structured.managerMustProvide.map((x) => ({
+      name: x.name,
+      evidence: String(x.evidence ?? "").slice(0, 120),
+    })),
+    requiredIds: requiredPreview.map((d) => d.id),
+    requiredTitles: requiredPreview.map((d) => d.title),
+  });
 
   return {
     ok: true,
