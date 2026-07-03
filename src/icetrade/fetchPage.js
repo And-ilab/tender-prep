@@ -236,7 +236,7 @@ function bufferStartsLikeHtml(buffer) {
 
 /**
  * @param {Buffer} buffer
- * @returns {"pdf"|"zip"|"doc"|"html"|"unknown"}
+ * @returns {"pdf"|"zip"|"rar"|"7z"|"doc"|"html"|"unknown"}
  */
 export function detectAttachmentBufferKind(buffer) {
   if (!buffer || buffer.length < 4) return "unknown";
@@ -244,6 +244,8 @@ export function detectAttachmentBufferKind(buffer) {
   const sig5 = buffer.subarray(0, 5).toString("latin1");
   if (sig5.startsWith("%PDF")) return "pdf";
   if (buffer[0] === 0x50 && buffer[1] === 0x4b && buffer[2] === 0x03 && buffer[3] === 0x04) return "zip";
+  if (sig5.startsWith("Rar!")) return "rar";
+  if (buffer.subarray(0, 4).toString("latin1") === "7z\xBC") return "7z";
   if (buffer[0] === 0xd0 && buffer[1] === 0xcf && buffer[2] === 0x11 && buffer[3] === 0xe0) return "doc";
   return "unknown";
 }
@@ -480,7 +482,9 @@ export function validateAttachmentBuffer(buffer, fileName, contentType, fileUrl)
   if (/\.xlsx$/i.test(low) && kind === "zip") return { ok: true };
   if (/\.pptx$/i.test(low) && kind === "zip") return { ok: true };
   if (/\.zip$/i.test(low) && kind === "zip") return { ok: true };
-  if ((/\.bin$/i.test(low) || /^document-\d+$/i.test(low)) && (kind === "pdf" || kind === "zip" || kind === "doc")) {
+  if (/\.rar$/i.test(low) && kind === "rar") return { ok: true };
+  if (/\.7z$/i.test(low) && kind === "7z") return { ok: true };
+  if ((/\.bin$/i.test(low) || /^document-\d+$/i.test(low)) && (kind === "pdf" || kind === "zip" || kind === "doc" || kind === "rar" || kind === "7z")) {
     return { ok: true };
   }
   if (low.endsWith(".pdf") && (kind === "zip" || kind === "doc")) {

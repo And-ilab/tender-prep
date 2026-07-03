@@ -88,7 +88,8 @@ export async function runTenderInputsExtractForTelegram(p) {
     };
   }
 
-  const requiredDocuments = buildRequiredDocumentsList(ar.structured);
+  const corpus = "corpus" in ar && typeof ar.corpus === "string" ? ar.corpus : undefined;
+  const requiredDocuments = buildRequiredDocumentsList(ar.structured, { corpus });
   const inputsFolderWebViewLink =
     "inputsFolderWebViewLink" in ar ? ar.inputsFolderWebViewLink : undefined;
   const extractFileNames = ex.items.map((i) => String(i.sourceName ?? "")).filter(Boolean);

@@ -78,7 +78,14 @@ export const CANONICAL_DOCUMENT_TYPES = [
   {
     id: "reliability_letter",
     title: "Письмо о благонадёжности",
-    synonyms: ["благонадежност", "благонадёжност", "письмо о благонад"],
+    synonyms: [
+      "благонадежност",
+      "благонадёжност",
+      "письмо о благонад",
+      "форма письма о благонадёжности",
+      "форма письма о благонадежности",
+      "образец письма о благонад",
+    ],
     storage: "org",
     preparedByDefault: "manager",
   },
@@ -139,7 +146,7 @@ export const CANONICAL_DOCUMENT_TYPES = [
   {
     id: "reference_list",
     title: "Референс-лист",
-    synonyms: ["референс-лист", "референс", "reference list", "опыт выполнен"],
+    synonyms: ["референс-лист", "референс", "reference list"],
     storage: "tender",
     preparedByDefault: "manager",
   },

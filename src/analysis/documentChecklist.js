@@ -3,6 +3,35 @@ import {
   normalizeToCanonicalDocument,
 } from "./canonicalDocumentTypes.js";
 import { ensureDocumentUploadTargets } from "./ensureDocumentUploadTargets.js";
+import { listChildren } from "../drive/ops.js";
+import { ensureTenderTree } from "../drive/workspace.js";
+import {
+  formatFormSourceTelegramHint,
+  resolveDocumentFormSource,
+} from "./resolveDocumentFormSource.js";
+import {
+  formatVerifyTelegramSuffix,
+  isLenaPreparedChecklistItem,
+  isVerifyStatusAlreadyHave,
+  isVerifyStatusNeedsUpload,
+  shouldShowInLenaPrepareBlock,
+  verifyDocumentsForChecklist,
+} from "./verifyDocumentAvailability.js";
+
+/**
+ * @typedef {Object} QualificationRequirement
+ * @property {string} summary
+ * @property {string} evidence
+ * @property {string} [criteriaNumbers]
+ */
+
+/**
+ * @typedef {Object} OrgDocPeriodRule
+ * @property {string} summary
+ * @property {string} evidence
+ * @property {string} [computedDeadlineHint]
+ * @property {string} [computedPeriodHint]
+ */
 
 /**
  * @typedef {Object} AnalysisStructured
@@ -11,8 +40,13 @@ import { ensureDocumentUploadTargets } from "./ensureDocumentUploadTargets.js";
  * @property {string | null} submissionOverview
  * @property {string | null} submissionMethod
  * @property {string | null} submissionDeadline
- * @property {{ name: string; basis: string }[]} lenaCanPrepare
- * @property {{ name: string; reason: string; criteria: string }[]} managerMustProvide
+ * @property {QualificationRequirement[]} [qualificationRequirements]
+ * @property {OrgDocPeriodRule | null} [bankReferenceDateRule]
+ * @property {OrgDocPeriodRule | null} [balanceSheetPeriodRule]
+ * @property {OrgDocPeriodRule | null} [incomeStatementPeriodRule]
+ * @property {CpCompositionRequirement[]} [cpCompositionRequirements]
+ * @property {{ name: string; basis: string; evidence?: string }[]} lenaCanPrepare
+ * @property {{ name: string; reason: string; criteria: string; evidence?: string }[]} managerMustProvide
  */
 
 /**
@@ -103,21 +137,115 @@ export function isKpEmbeddedChecklistItem(doc) {
 }
 
 /**
- * Референс-лист — только при явном названии документа в КД (не критерии «аналогичный опыт»).
+ * Референс-лист — только если цитата из КД (evidence) содержит явное название документа.
  * @param {{ name?: string, basis?: string, reason?: string, criteria?: string, evidence?: string }} item
  */
 export function isExplicitReferenceListRequirement(item) {
-  const blob = requirementBlob(item);
-  return /референс|reference\s*list/i.test(blob);
+  const evidence = String(item.evidence ?? "").trim();
+  if (!evidence) return false;
+  return /референс[-\s]?лист|reference\s+list/i.test(evidence);
 }
 
 /**
- * Декларации соответствия — только при дословном упоминании в КД/ТЗ.
+ * Декларации соответствия — только если цитата из КД/ТЗ содержит дословную формулировку.
  * @param {{ name?: string, basis?: string, reason?: string, criteria?: string, evidence?: string }} item
  */
 export function isExplicitConformityDeclarationRequirement(item) {
-  const blob = requirementBlob(item);
-  return /декларац\S*\s+соответств/i.test(blob);
+  const evidence = String(item.evidence ?? "").trim();
+  if (!evidence) return false;
+  return /декларац\S*\s+соответств/i.test(evidence);
+}
+
+/**
+ * Заявление о соответствии — только при дословной формулировке в evidence.
+ * @param {{ name?: string, basis?: string, reason?: string, criteria?: string, evidence?: string }} item
+ */
+export function isExplicitComplianceStatementRequirement(item) {
+  const evidence = String(item.evidence ?? "").trim();
+  if (!evidence) return false;
+  return /заявлени\S*\s+о\s+соответств/i.test(evidence);
+}
+
+/**
+ * Дилерское/агентское с производителем — не путать с доверенностью на подачу.
+ * @param {{ name?: string, basis?: string, reason?: string, criteria?: string, evidence?: string }} item
+ */
+export function isExplicitDealerRepresentativeRequirement(item) {
+  const evidence = String(item.evidence ?? "").trim();
+  if (!evidence) return false;
+  if (/доверенност/i.test(evidence) && !/дилерск|агентск|официальн\w*\s+представител/i.test(evidence)) {
+    return false;
+  }
+  return /дилерск|агентск|официальн\w*\s+представител\w*\s+производител/i.test(evidence);
+}
+
+/**
+ * Документ привязан к конкретному юрлицу (_lena/org-docs, _lena/founding-docs).
+ * На шаге 1 показываем в полном «К подаче»; наличие на Drive проверяем только после выбора org.
+ * @param {{ storage?: string }} doc
+ */
+export function isOrgBoundChecklistDocument(doc) {
+  return doc.storage === "org" || doc.storage === "founding";
+}
+
+/**
+ * @param {NormalizedDoc[]} docs
+ */
+export function filterPreOrgChecklistDocuments(docs) {
+  return docs.filter((d) => !isOrgBoundChecklistDocument(d));
+}
+
+/**
+ * @param {AnalysisStructured} structured
+ * @param {string} canonicalId
+ */
+export function orgDocPeriodHintForStep1(structured, canonicalId) {
+  if (canonicalId === "bank_reference") {
+    const rule = structured.bankReferenceDateRule;
+    if (rule?.summary?.trim()) return rule.summary.trim();
+  }
+  if (canonicalId === "balance_sheet") {
+    const rule = structured.balanceSheetPeriodRule;
+    if (rule?.summary?.trim()) return rule.summary.trim();
+  }
+  if (canonicalId === "income_statement") {
+    const rule = structured.incomeStatementPeriodRule;
+    if (rule?.summary?.trim()) return rule.summary.trim();
+  }
+  const item = structured.managerMustProvide?.find(
+    (x) =>
+      normalizeToCanonicalDocument(stripRequirementParentheticals(x.name) || x.name).id ===
+      canonicalId,
+  );
+  const criteria = item?.criteria?.trim();
+  if (criteria && criteria !== "—") return criteria;
+  return null;
+}
+
+/** @deprecated use orgDocPeriodHintForStep1 */
+export function bankReferenceDateHintForStep1(structured) {
+  return orgDocPeriodHintForStep1(structured, "bank_reference");
+}
+
+export { isLenaPreparedChecklistItem };
+
+/**
+ * @param {string} corpus
+ */
+export function corpusMentionsCommercialProposal(corpus) {
+  return /коммерческ\S*\s+предложен|коммерческ\S*предложен/i.test(String(corpus ?? ""));
+}
+
+/**
+ * В корпусе inputs есть ветка п.3.2 про сертификат о происхождении для товаров не из СНГ.
+ * @param {string} corpus
+ */
+export function corpusRequiresNonCisOriginCertificate(corpus) {
+  const c = String(corpus ?? "");
+  return (
+    /не\s+являющ\w*\s+участник\w*\s+содружеств\w*\s+независим\w*\s+государств/i.test(c) ||
+    /сертификат\s+о\s+происхождении\s+товар/i.test(c)
+  );
 }
 
 /**
@@ -130,6 +258,15 @@ export function shouldIncludeChecklistItem(item, normalized) {
   if (
     normalized.id === "conformity_declarations" &&
     !isExplicitConformityDeclarationRequirement(item)
+  ) {
+    return false;
+  }
+  if (normalized.id === "compliance_statement" && !isExplicitComplianceStatementRequirement(item)) {
+    return false;
+  }
+  if (
+    normalized.id === "dealer_representative_docs" &&
+    !isExplicitDealerRepresentativeRequirement(item)
   ) {
     return false;
   }
@@ -167,6 +304,11 @@ export function uploadTargetDisplayTitle(docId, title) {
 export function applyCanonicalNamesToStructured(structured) {
   return {
     ...structured,
+    qualificationRequirements: structured.qualificationRequirements ?? [],
+    bankReferenceDateRule: structured.bankReferenceDateRule ?? null,
+    balanceSheetPeriodRule: structured.balanceSheetPeriodRule ?? null,
+    incomeStatementPeriodRule: structured.incomeStatementPeriodRule ?? null,
+    cpCompositionRequirements: structured.cpCompositionRequirements ?? [],
     lenaCanPrepare: structured.lenaCanPrepare
       .filter((x) => !isExcludedParticipantRequirement(x))
       .map((x) => {
@@ -234,8 +376,9 @@ export function sortSubmissionDocuments(docs) {
 /**
  * Плоский список состава документов по КД (шаг 1 Telegram).
  * @param {AnalysisStructured} structured
+ * @param {{ corpus?: string }} [opts]
  */
-export function buildRequiredDocumentsList(structured) {
+export function buildRequiredDocumentsList(structured, opts = {}) {
   const lena = normalizeItemList("lena", structured.lenaCanPrepare);
   const mgr = normalizeItemList("manager", structured.managerMustProvide);
   /** @type {Map<string, NormalizedDoc>} */
@@ -245,11 +388,26 @@ export function buildRequiredDocumentsList(structured) {
     if (!all.has(key)) all.set(key, d);
   }
   let list = sortSubmissionDocuments([...all.values()]);
-  if (!list.some((d) => d.id === "commercial_proposal")) {
-    list = [
+  const corpus = opts.corpus?.trim();
+  const hasCp = list.some((d) => d.id === "commercial_proposal");
+  if (!hasCp && corpus && corpusMentionsCommercialProposal(corpus)) {
+    list = sortSubmissionDocuments([
       { ...normalizeToCanonicalDocument("Коммерческое предложение"), source: "lena" },
       ...list,
-    ];
+    ]);
+  }
+  if (
+    corpus &&
+    corpusRequiresNonCisOriginCertificate(corpus) &&
+    !list.some((d) => d.id === "certificate_of_origin")
+  ) {
+    list = sortSubmissionDocuments([
+      ...list,
+      {
+        ...normalizeToCanonicalDocument("Сертификат о происхождении товара"),
+        source: "manager",
+      },
+    ]);
   }
   return list;
 }
@@ -286,11 +444,24 @@ export function buildRefinedChecklist(requiredDocuments, offerOrg, structured) {
 
 /**
  * @param {AnalysisStructured} structured
+ */
+export function formatQualificationRequirementsTelegram(structured) {
+  const items = structured.qualificationRequirements ?? [];
+  if (!items.length) return "";
+  const lines = ["**Требования к квалификации:**"];
+  for (const x of items) {
+    lines.push(`- ${x.summary}`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * @param {AnalysisStructured} structured
  * @param {NormalizedDoc[]} requiredDocuments
  * @param {string | undefined} inputsFolderWebViewLink
  */
 export function formatDocumentCompositionStep1Telegram(
-  _structured,
+  structured,
   requiredDocuments,
   inputsFolderWebViewLink,
 ) {
@@ -300,51 +471,119 @@ export function formatDocumentCompositionStep1Telegram(
       ? `**Документы заказчика:** ${docsLink}`
       : "**Документы заказчика:** — _(папка inputs на Drive)_",
     "",
-    "**К подаче:**",
   ];
-  if (!requiredDocuments.length) {
-    lines.push("- _(в КД не выделены документы с цитатой — проверьте парсинг.)_");
-  } else {
-    for (const d of requiredDocuments) {
-      lines.push(`- ${submissionDisplayTitle(d)}`);
-    }
+
+  const qualBlock = formatQualificationRequirementsTelegram(structured);
+  if (qualBlock) {
+    lines.push(qualBlock);
+    lines.push("");
   }
-  return lines.join("\n");
+
+  if (requiredDocuments.length) {
+    lines.push("**К подаче:**");
+    for (const d of requiredDocuments) {
+      let line = `- ${submissionDisplayTitle(d)}`;
+      const periodHint = orgDocPeriodHintForStep1(structured, d.id);
+      if (periodHint && (d.id === "bank_reference" || d.id === "balance_sheet" || d.id === "income_statement")) {
+        line += ` _(${periodHint})_`;
+      }
+      lines.push(line);
+    }
+    lines.push("");
+    lines.push("_После выбора участника — проверка наличия документов организации на Drive._");
+    lines.push("");
+  } else if (!qualBlock) {
+    lines.push("- _(в КД не выделены требования с цитатой — проверьте парсинг.)_");
+  }
+
+  return lines.join("\n").trimEnd();
 }
 
 /**
  * @param {AnalysisStructured} structured
  * @param {"gs_retail" | "finselvat"} offerOrg
  * @param {string} orgLabel
- * @param {NormalizedDoc[]} lenaPrepare
+ * @param {{ doc: NormalizedDoc, verify: import("./verifyDocumentAvailability.js").DocumentVerifyResult }[]} verifyResults
  * @param {import("./ensureDocumentUploadTargets.js").DocumentUploadTarget[]} uploadTargets
+ * @param {Map<string, Awaited<ReturnType<typeof resolveDocumentFormSource>>>} [formHints]
  */
 export function formatRefinedChecklistStep2Telegram(
   structured,
   offerOrg,
   orgLabel,
-  lenaPrepare,
+  verifyResults,
   uploadTargets,
+  formHints = new Map(),
 ) {
   const title = structured.tenderTitle?.trim() || "Закупка";
   const linkById = new Map(uploadTargets.map((t) => [t.docId, t.webViewLink]));
 
-  const lines = [`**${title}**`, `Участник: **${orgLabel}**`, "", "**Подготовлю сама:**"];
-  if (!lenaPrepare.length) {
-    lines.push("- _(нет пунктов с опорой в КД — уточните по документам.)_");
-  } else {
-    for (const d of lenaPrepare) {
-      lines.push(`- ${submissionDisplayTitle(d)}`);
+  const lines = [`**${title}**`, `Участник: **${orgLabel}**`, ""];
+
+  const qualBlock = formatQualificationRequirementsTelegram(structured);
+  if (qualBlock) {
+    lines.push(qualBlock, "");
+  }
+
+  /** @type {typeof verifyResults} */
+  const alreadyHave = [];
+  /** @type {typeof verifyResults} */
+  const lenaPrepare = [];
+  /** @type {typeof verifyResults} */
+  const needUpload = [];
+
+  for (const row of verifyResults) {
+    const { doc, verify } = row;
+    if (isVerifyStatusAlreadyHave(verify.status)) {
+      alreadyHave.push(row);
+    } else if (shouldShowInLenaPrepareBlock(doc, verify, structured)) {
+      lenaPrepare.push(row);
+    } else if (isVerifyStatusNeedsUpload(verify.status)) {
+      needUpload.push(row);
+    } else {
+      needUpload.push(row);
     }
   }
 
-  lines.push("", "**Требует догрузки:**");
-  if (!uploadTargets.length) {
+  lines.push("**Уже есть:**");
+  if (!alreadyHave.length) {
+    lines.push("- _(пока ничего не найдено на Drive)_");
+  } else {
+    for (const { doc, verify } of alreadyHave) {
+      lines.push(`- ${submissionDisplayTitle(doc)}${formatVerifyTelegramSuffix(verify)}`);
+    }
+  }
+
+  lines.push("", "**Подготовлю сама:**");
+  if (!lenaPrepare.length) {
+    lines.push("- _(нет пунктов с опорой в КД — уточните по документам.)_");
+  } else {
+    for (const { doc, verify } of lenaPrepare) {
+      const key = doc.id !== "other" ? doc.id : `other:${doc.rawName}`;
+      const formHint = formHints.get(key);
+      const formSuffix = formHint ? formatFormSourceTelegramHint(formHint) : "";
+      const verifySuffix =
+        verify.status === "form_customer" || verify.status === "form_template"
+          ? formatVerifyTelegramSuffix(verify)
+          : verify.status === "lena_draft" && verify.note
+            ? ` — _${verify.note}_`
+            : "";
+      lines.push(`- ${submissionDisplayTitle(doc)}${formSuffix || verifySuffix}`);
+    }
+  }
+
+  lines.push("", "**Нужно получить / догрузить:**");
+  if (!needUpload.length) {
     lines.push("- _(нет — переходите к условиям.)_");
   } else {
-    for (const t of uploadTargets) {
-      const link = linkById.get(t.docId) ?? t.webViewLink;
-      lines.push(`- ${uploadTargetDisplayTitle(t.docId, t.title)} — [загрузить](${link})`);
+    for (const { doc, verify } of needUpload) {
+      const link = linkById.get(doc.id);
+      const titleLine = uploadTargetDisplayTitle(doc.id, doc.title);
+      if (link) {
+        lines.push(`- ${titleLine} — [загрузить](${link})${formatVerifyTelegramSuffix(verify)}`);
+      } else {
+        lines.push(`- ${titleLine}${formatVerifyTelegramSuffix(verify)}`);
+      }
     }
   }
 
@@ -359,6 +598,7 @@ export function formatRefinedChecklistStep2Telegram(
  * @param {AnalysisStructured} structured
  * @param {NormalizedDoc[]} requiredDocuments
  * @param {{ flat?: boolean, year?: string }} treeOpts
+ * @param {{ corpus?: string, inputFiles?: { name?: string, id?: string, mimeType?: string }[] }} [bundleOpts]
  */
 export async function buildRefinedChecklistTelegramBundle(
   userRootId,
@@ -368,21 +608,70 @@ export async function buildRefinedChecklistTelegramBundle(
   structured,
   requiredDocuments,
   treeOpts,
+  bundleOpts = {},
 ) {
-  const { lenaPrepare, managerUpload } = buildRefinedChecklist(requiredDocuments, offerOrg, structured);
+  const verifyResults = await verifyDocumentsForChecklist(
+    userRootId,
+    tenderId,
+    offerOrg,
+    requiredDocuments,
+    structured,
+    {
+      flat: treeOpts.flat,
+      year: treeOpts.year,
+      inputFiles: bundleOpts.inputFiles,
+      corpus: bundleOpts.corpus ?? "",
+    },
+  );
+
+  const needUploadDocs = verifyResults
+    .filter(({ doc, verify }) => {
+      if (shouldShowInLenaPrepareBlock(doc, verify, structured)) return false;
+      if (isVerifyStatusAlreadyHave(verify.status)) return false;
+      return true;
+    })
+    .map(({ doc }) => doc);
+
   const uploadTargets = await ensureDocumentUploadTargets(
     userRootId,
     tenderId,
     offerOrg,
-    managerUpload.map((d) => ({ id: d.id, title: d.title, storage: d.storage })),
+    needUploadDocs.map((d) => ({ id: d.id, title: d.title, storage: d.storage })),
     treeOpts,
   );
+
+  let inputFiles = bundleOpts.inputFiles;
+  if (!inputFiles?.length) {
+    const { tender } = await ensureTenderTree(userRootId, tenderId, treeOpts);
+    inputFiles = await listChildren(tender.inputsId);
+  }
+
+  /** @type {Map<string, Awaited<ReturnType<typeof resolveDocumentFormSource>>>} */
+  const formHints = new Map();
+  for (const { doc, verify } of verifyResults) {
+    if (!shouldShowInLenaPrepareBlock(doc, verify, structured)) continue;
+    const key = doc.id !== "other" ? doc.id : `other:${doc.rawName}`;
+    const pickTemplateStrategy =
+      doc.id === "budget_debt_statement" ? "most_complete" : "best_match";
+    formHints.set(
+      key,
+      await resolveDocumentFormSource(userRootId, offerOrg, doc, {
+        inputFiles,
+        corpus: bundleOpts.corpus ?? "",
+        pickTemplateStrategy,
+      }),
+    );
+  }
+
+  const { lenaPrepare, managerUpload } = buildRefinedChecklist(requiredDocuments, offerOrg, structured);
+
   const text = formatRefinedChecklistStep2Telegram(
     structured,
     offerOrg,
     orgLabel,
-    lenaPrepare,
+    verifyResults,
     uploadTargets,
+    formHints,
   );
-  return { text, lenaPrepare, managerUpload, uploadTargets };
+  return { text, lenaPrepare, managerUpload, uploadTargets, formHints, verifyResults };
 }

@@ -14,6 +14,7 @@ import {
   uploadFile,
 } from "../drive/ops.js";
 import { ensureTenderTree } from "../drive/workspace.js";
+import { ARCHIVE_EXPAND_MANIFEST_NAME, expandArchivesInInputs } from "./expandInputsArchives.js";
 
 /**
  * Парсинг `inputs/`: правило продукта
@@ -231,7 +232,7 @@ export function classifyInputFileForParsing(mimeType, name) {
   const low = name.toLowerCase();
 
   if (mime === "application/vnd.google-apps.folder") return { kind: "folder" };
-  if (!name || name === MANIFEST_NAME) return { kind: "skip" };
+  if (!name || name === MANIFEST_NAME || name === ARCHIVE_EXPAND_MANIFEST_NAME) return { kind: "skip" };
 
   if (mime === "application/vnd.google-apps.document") return { kind: "google_doc" };
   if (mime === "application/vnd.google-apps.spreadsheet") return { kind: "google_sheet" };
@@ -262,6 +263,8 @@ export function classifyInputFileForParsing(mimeType, name) {
     return { kind: "native_utf8" };
   }
   if (mime === "application/json" || mime === "application/xml") return { kind: "native_utf8" };
+
+  if (/\.(zip|rar|7z)$/i.test(low)) return { kind: "skip" };
 
   return { kind: "unknown" };
 }
@@ -520,6 +523,12 @@ export async function extractTenderInputDocumentsToExtracted(userRootId, tenderI
   const tenderFolderId = tender.folderId;
   await assertInputsFolderUnderTender({ userRootId, tenderFolderId, inputsId });
 
+  try {
+    await expandArchivesInInputs(inputsId);
+  } catch {
+    /* не блокируем парсинг, если распаковка недоступна */
+  }
+
   const topLevel = await listChildren(inputsId);
   /** @type {{ id: string; name: string; mime: string; kind: InputParseKind }[]} */
   const work = [];
@@ -529,7 +538,7 @@ export async function extractTenderInputDocumentsToExtracted(userRootId, tenderI
     const name = String(f.name ?? "file");
     if (mime === "application/vnd.google-apps.folder") continue;
     if (name === INPUTS_EXTRACTED_SUBDIR) continue;
-    if (!id || !name || name === MANIFEST_NAME) continue;
+    if (!id || !name || name === MANIFEST_NAME || name === ARCHIVE_EXPAND_MANIFEST_NAME) continue;
     const { kind } = classifyInputFileForParsing(mime, name);
     if (kind === "folder" || kind === "skip") continue;
     work.push({ id, name, mime, kind });
@@ -911,7 +920,7 @@ export async function readNativeInputsTextsConcat(inputsId, maxTotalChars = 95_0
     if (!id || !name) continue;
     if (mime === "application/vnd.google-apps.folder") continue;
     if (name === INPUTS_EXTRACTED_SUBDIR) continue;
-    if (name === MANIFEST_NAME) continue;
+    if (name === MANIFEST_NAME || name === ARCHIVE_EXPAND_MANIFEST_NAME) continue;
     const { kind } = classifyInputFileForParsing(mime, name);
     if (kind !== "native_utf8") continue;
     nat.push({ id, name });

@@ -31,8 +31,15 @@ import {
   formatDocumentCompositionStep1Telegram,
   isExcludedParticipantRequirement,
   isNonResidentOnlyRequirement,
+  shouldIncludeChecklistItem,
+  stripRequirementParentheticals,
 } from "../analysis/documentChecklist.js";
-import { canonicalTitlesForAnalysisPrompt } from "../analysis/canonicalDocumentTypes.js";
+import { computeBankReferenceMaxDateIso } from "../analysis/verifyDocumentAvailability.js";
+import { computeLastReportingQuarterHint } from "../analysis/identifyUploadedDocuments.js";
+import {
+  canonicalTitlesForAnalysisPrompt,
+  normalizeToCanonicalDocument,
+} from "../analysis/canonicalDocumentTypes.js";
 import {
   buildSnapshotCorpusAugmentation,
   readIceTradeImportSnapshot,
@@ -211,6 +218,8 @@ function normalizeAnalysis(o) {
   const lenaCanPrepare = [];
   /** @type {{ name: string; reason: string; criteria: string; evidence: string }[]} */
   const managerMustProvide = [];
+  /** @type {{ summary: string; evidence: string; criteriaNumbers?: string }[]} */
+  const qualificationRequirements = [];
 
   const a = typeof o.lenaCanPrepare === "object" && o.lenaCanPrepare !== null ? o.lenaCanPrepare : [];
   const b =
@@ -243,6 +252,107 @@ function normalizeAnalysis(o) {
     }
   }
 
+  const q =
+    typeof o.qualificationRequirements === "object" && o.qualificationRequirements !== null
+      ? o.qualificationRequirements
+      : [];
+  if (Array.isArray(q)) {
+    for (const x of q) {
+      if (!x || typeof x !== "object") continue;
+      const summary =
+        typeof /** @type {{ summary?: string }} */ (x).summary === "string" ? x.summary.trim() : "";
+      const evidence =
+        typeof /** @type {{ evidence?: string }} */ (x).evidence === "string" ? x.evidence.trim() : "";
+      const criteriaNumbers =
+        typeof /** @type {{ criteriaNumbers?: string }} */ (x).criteriaNumbers === "string"
+          ? x.criteriaNumbers.trim()
+          : "";
+      if (summary) {
+        qualificationRequirements.push({
+          summary,
+          evidence,
+          criteriaNumbers: criteriaNumbers || undefined,
+        });
+      }
+    }
+  }
+
+  /** @type {{ summary: string; evidence: string }[]} */
+  const cpCompositionRequirements = [];
+  const cpRaw =
+    typeof o.cpCompositionRequirements === "object" && o.cpCompositionRequirements !== null
+      ? o.cpCompositionRequirements
+      : [];
+  if (Array.isArray(cpRaw)) {
+    for (const x of cpRaw) {
+      if (!x || typeof x !== "object") continue;
+      const summary =
+        typeof /** @type {{ summary?: string }} */ (x).summary === "string" ? x.summary.trim() : "";
+      const evidence =
+        typeof /** @type {{ evidence?: string }} */ (x).evidence === "string" ? x.evidence.trim() : "";
+      if (summary) cpCompositionRequirements.push({ summary, evidence });
+    }
+  }
+
+  /** @type {{ summary: string; evidence: string; computedDeadlineHint?: string } | null} */
+  let bankReferenceDateRule = null;
+  const br = o.bankReferenceDateRule;
+  if (br && typeof br === "object") {
+    const summary =
+      typeof /** @type {{ summary?: string }} */ (br).summary === "string" ? br.summary.trim() : "";
+    const evidence =
+      typeof /** @type {{ evidence?: string }} */ (br).evidence === "string" ? br.evidence.trim() : "";
+    const computedDeadlineHint =
+      typeof /** @type {{ computedDeadlineHint?: string }} */ (br).computedDeadlineHint === "string"
+        ? br.computedDeadlineHint.trim()
+        : "";
+    if (summary) {
+      bankReferenceDateRule = {
+        summary,
+        evidence,
+        computedDeadlineHint: computedDeadlineHint || undefined,
+      };
+    }
+  }
+
+  /** @type {{ summary: string; evidence: string; computedPeriodHint?: string } | null} */
+  let balanceSheetPeriodRule = null;
+  const bs = o.balanceSheetPeriodRule;
+  if (bs && typeof bs === "object") {
+    const summary =
+      typeof /** @type {{ summary?: string }} */ (bs).summary === "string" ? bs.summary.trim() : "";
+    const evidence =
+      typeof /** @type {{ evidence?: string }} */ (bs).evidence === "string" ? bs.evidence.trim() : "";
+    const computedPeriodHint =
+      typeof /** @type {{ computedPeriodHint?: string }} */ (bs).computedPeriodHint === "string"
+        ? bs.computedPeriodHint.trim()
+        : "";
+    if (summary) {
+      balanceSheetPeriodRule = { summary, evidence, computedPeriodHint: computedPeriodHint || undefined };
+    }
+  }
+
+  /** @type {{ summary: string; evidence: string; computedPeriodHint?: string } | null} */
+  let incomeStatementPeriodRule = null;
+  const isr = o.incomeStatementPeriodRule;
+  if (isr && typeof isr === "object") {
+    const summary =
+      typeof /** @type {{ summary?: string }} */ (isr).summary === "string" ? isr.summary.trim() : "";
+    const evidence =
+      typeof /** @type {{ evidence?: string }} */ (isr).evidence === "string" ? isr.evidence.trim() : "";
+    const computedPeriodHint =
+      typeof /** @type {{ computedPeriodHint?: string }} */ (isr).computedPeriodHint === "string"
+        ? isr.computedPeriodHint.trim()
+        : "";
+    if (summary) {
+      incomeStatementPeriodRule = {
+        summary,
+        evidence,
+        computedPeriodHint: computedPeriodHint || undefined,
+      };
+    }
+  }
+
   return {
     tenderTitle: tenderTitle || null,
     sumOrBudget: sumOrBudget || null,
@@ -251,7 +361,149 @@ function normalizeAnalysis(o) {
     submissionDeadline: submissionDeadline || null,
     lenaCanPrepare,
     managerMustProvide,
+    qualificationRequirements,
+    cpCompositionRequirements,
+    bankReferenceDateRule,
+    balanceSheetPeriodRule,
+    incomeStatementPeriodRule,
   };
+}
+
+/**
+ * @param {{ summary: string; evidence?: string; criteriaNumbers?: string }} x
+ * @param {string} corpus
+ */
+function passesQualificationGrounding(x, corpus) {
+  if (!x.summary?.trim()) return false;
+  const strict = isAnalyzeGroundingStrict();
+  if (!strict) return Boolean(x.evidence?.trim());
+  if (!corpus.trim()) return false;
+  return Boolean(x.evidence && evidenceAppearsInCorpus(x.evidence, corpus));
+}
+
+/**
+ * @param {{ summary: string; evidence?: string; criteriaNumbers?: string }[]} items
+ * @param {string} corpus
+ */
+function filterQualificationRequirements(items, corpus) {
+  return items
+    .filter((x) => passesQualificationGrounding(x, corpus))
+    .map(({ summary, evidence, criteriaNumbers }) => ({
+      summary: summary.trim(),
+      evidence: String(evidence ?? "").trim(),
+      criteriaNumbers: criteriaNumbers?.trim() || undefined,
+    }));
+}
+
+/**
+ * @param {{ summary: string; evidence?: string }} x
+ * @param {string} corpus
+ */
+function passesSummaryEvidenceGrounding(x, corpus) {
+  if (!x.summary?.trim()) return false;
+  const strict = isAnalyzeGroundingStrict();
+  if (!strict) return Boolean(x.evidence?.trim());
+  if (!corpus.trim()) return false;
+  return Boolean(x.evidence && evidenceAppearsInCorpus(x.evidence, corpus));
+}
+
+/**
+ * @param {{ summary: string; evidence?: string }[]} items
+ * @param {string} corpus
+ */
+function filterSummaryEvidenceList(items, corpus) {
+  return items
+    .filter((x) => passesSummaryEvidenceGrounding(x, corpus))
+    .map(({ summary, evidence }) => ({
+      summary: summary.trim(),
+      evidence: String(evidence ?? "").trim(),
+    }));
+}
+
+/**
+ * @param {{ summary: string; evidence?: string; computedDeadlineHint?: string } | null} rule
+ * @param {string} corpus
+ */
+function filterOrgPeriodRule(rule, corpus) {
+  if (!rule?.summary?.trim()) return null;
+  if (!passesSummaryEvidenceGrounding(rule, corpus)) return null;
+  return {
+    summary: rule.summary.trim(),
+    evidence: String(rule.evidence ?? "").trim(),
+    computedDeadlineHint: rule.computedDeadlineHint?.trim() || undefined,
+    computedPeriodHint: rule.computedPeriodHint?.trim() || undefined,
+  };
+}
+
+/**
+ * @param {ReturnType<typeof normalizeAnalysis>} structured
+ */
+function enrichOrgDocPeriodFields(structured) {
+  let bankReferenceDateRule = structured.bankReferenceDateRule;
+  let balanceSheetPeriodRule = structured.balanceSheetPeriodRule ?? null;
+  let incomeStatementPeriodRule = structured.incomeStatementPeriodRule ?? null;
+
+  if (!bankReferenceDateRule) {
+    const item = structured.managerMustProvide.find(
+      (x) => normalizeToCanonicalDocument(stripRequirementParentheticals(x.name) || x.name).id === "bank_reference",
+    );
+    if (item) {
+      const summary =
+        (item.criteria && item.criteria !== "—" ? item.criteria : item.reason) || item.name;
+      bankReferenceDateRule = { summary, evidence: item.evidence || summary };
+    }
+  }
+  if (!balanceSheetPeriodRule) {
+    const item = structured.managerMustProvide.find(
+      (x) => normalizeToCanonicalDocument(stripRequirementParentheticals(x.name) || x.name).id === "balance_sheet",
+    );
+    if (item) {
+      const summary =
+        (item.criteria && item.criteria !== "—" ? item.criteria : item.reason) || item.name;
+      balanceSheetPeriodRule = { summary, evidence: item.evidence || summary };
+    }
+  }
+  if (!incomeStatementPeriodRule) {
+    const item = structured.managerMustProvide.find(
+      (x) =>
+        normalizeToCanonicalDocument(stripRequirementParentheticals(x.name) || x.name).id ===
+        "income_statement",
+    );
+    if (item) {
+      const summary =
+        (item.criteria && item.criteria !== "—" ? item.criteria : item.reason) || item.name;
+      incomeStatementPeriodRule = { summary, evidence: item.evidence || summary };
+    }
+  }
+
+  if (bankReferenceDateRule && structured.submissionDeadline) {
+    const max = computeBankReferenceMaxDateIso(structured.submissionDeadline);
+    if (max) bankReferenceDateRule = { ...bankReferenceDateRule, computedDeadlineHint: max };
+  }
+  const periodHint = computeLastReportingQuarterHint(structured.submissionDeadline);
+  if (balanceSheetPeriodRule && periodHint && !balanceSheetPeriodRule.computedPeriodHint) {
+    balanceSheetPeriodRule = { ...balanceSheetPeriodRule, computedPeriodHint: periodHint };
+  }
+  if (incomeStatementPeriodRule && periodHint && !incomeStatementPeriodRule.computedPeriodHint) {
+    incomeStatementPeriodRule = { ...incomeStatementPeriodRule, computedPeriodHint: periodHint };
+  }
+
+  return {
+    ...structured,
+    bankReferenceDateRule,
+    balanceSheetPeriodRule,
+    incomeStatementPeriodRule,
+    cpCompositionRequirements: structured.cpCompositionRequirements ?? [],
+  };
+}
+
+/**
+ * @param {{ name: string; basis?: string; reason?: string; criteria?: string; evidence?: string }} x
+ */
+function passesChecklistEvidenceFilter(x) {
+  const cleanName = stripRequirementParentheticals(x.name) || x.name;
+  const n = normalizeToCanonicalDocument(cleanName);
+  return shouldIncludeChecklistItem({ ...x, evidence: x.evidence }, n);
 }
 
 /**
@@ -263,44 +515,77 @@ function keepOnlyCorpusGrounded(structured, corpus) {
   const strict = isAnalyzeGroundingStrict();
 
   if (!strict || !corpus.trim()) {
-    return {
+    return enrichOrgDocPeriodFields({
       ...structured,
+      qualificationRequirements: filterQualificationRequirements(
+        structured.qualificationRequirements ?? [],
+        corpus,
+      ),
+      cpCompositionRequirements: filterSummaryEvidenceList(
+        structured.cpCompositionRequirements ?? [],
+        corpus,
+      ),
+      bankReferenceDateRule: filterOrgPeriodRule(structured.bankReferenceDateRule, corpus),
+      balanceSheetPeriodRule: filterOrgPeriodRule(structured.balanceSheetPeriodRule, corpus),
+      incomeStatementPeriodRule: filterOrgPeriodRule(structured.incomeStatementPeriodRule, corpus),
       lenaCanPrepare: structured.lenaCanPrepare
         .filter((x) => !isExcludedParticipantRequirement(x))
-        .map(({ name, basis }) => ({ name, basis })),
+        .filter((x) => passesChecklistEvidenceFilter(x))
+        .map(({ name, basis, evidence }) => ({ name, basis, evidence })),
       managerMustProvide: structured.managerMustProvide
         .filter((x) => !isExcludedParticipantRequirement(x))
-        .map(({ name, reason, criteria }) => ({
+        .filter((x) => passesChecklistEvidenceFilter(x))
+        .map(({ name, reason, criteria, evidence }) => ({
           name,
           reason,
           criteria,
+          evidence,
         })),
-    };
+    });
   }
 
-  /** @type {{ name: string; basis: string }[]} */
+  /** @type {{ name: string; basis: string; evidence?: string }[]} */
   const lenaOk = [];
   for (const x of structured.lenaCanPrepare) {
-    if (evidenceAppearsInCorpus(x.evidence, corpus)) lenaOk.push({ name: x.name, basis: x.basis });
+    if (!evidenceAppearsInCorpus(x.evidence, corpus)) continue;
+    if (!passesChecklistEvidenceFilter(x)) continue;
+    lenaOk.push({ name: x.name, basis: x.basis, evidence: x.evidence });
   }
 
-  /** @type {{ name: string; reason: string; criteria: string }[]} */
+  /** @type {{ name: string; reason: string; criteria: string; evidence?: string }[]} */
   const mgrOk = [];
   for (const x of structured.managerMustProvide) {
     if (!evidenceAppearsInCorpus(x.evidence, corpus)) continue;
+    if (!passesChecklistEvidenceFilter(x)) continue;
     let criteria = x.criteria;
     if (criteria && !evidenceAppearsInCorpus(criteria, corpus) && criteria !== "—") {
       const critTrim = collapseWs(criteria);
       if (critTrim.length >= 14 && !evidenceAppearsInCorpus(critTrim, corpus)) criteria = null;
     }
-    mgrOk.push({ name: x.name, reason: x.reason, criteria: criteria || "—" });
+    mgrOk.push({
+      name: x.name,
+      reason: x.reason,
+      criteria: criteria || "—",
+      evidence: x.evidence,
+    });
   }
 
-  return {
+  return enrichOrgDocPeriodFields({
     ...structured,
+    qualificationRequirements: filterQualificationRequirements(
+      structured.qualificationRequirements ?? [],
+      corpus,
+    ),
+    cpCompositionRequirements: filterSummaryEvidenceList(
+      structured.cpCompositionRequirements ?? [],
+      corpus,
+    ),
+    bankReferenceDateRule: filterOrgPeriodRule(structured.bankReferenceDateRule, corpus),
+    balanceSheetPeriodRule: filterOrgPeriodRule(structured.balanceSheetPeriodRule, corpus),
+    incomeStatementPeriodRule: filterOrgPeriodRule(structured.incomeStatementPeriodRule, corpus),
     lenaCanPrepare: lenaOk.filter((x) => !isExcludedParticipantRequirement(x)),
     managerMustProvide: mgrOk.filter((x) => !isExcludedParticipantRequirement(x)),
-  };
+  });
 }
 
 /**
@@ -315,15 +600,7 @@ function applyStrictCorpusGrounding(parsed, corpus) {
   let structured = normalizeAnalysis(parsed);
 
   if (!isAnalyzeGroundingStrict()) {
-    return {
-      ...structured,
-      lenaCanPrepare: structured.lenaCanPrepare.map(({ name, basis }) => ({ name, basis })),
-      managerMustProvide: structured.managerMustProvide.map(({ name, reason, criteria }) => ({
-        name,
-        reason,
-        criteria,
-      })),
-    };
+    return keepOnlyCorpusGrounded(structured, corpus);
   }
 
   const c = corpus.trim();
@@ -336,6 +613,11 @@ function applyStrictCorpusGrounding(parsed, corpus) {
       submissionDeadline: null,
       lenaCanPrepare: [],
       managerMustProvide: [],
+      qualificationRequirements: [],
+      cpCompositionRequirements: [],
+      bankReferenceDateRule: null,
+      balanceSheetPeriodRule: null,
+      incomeStatementPeriodRule: null,
     };
   }
 
@@ -423,6 +705,14 @@ function buildAnalysisMarkdown(viewId, structured, notParsedFiles, ragUsed, used
     "## Перечень к подаче (кратко)",
     structured.submissionOverview || "—",
     "",
+    "## Требования к квалификации (саммари с цитатами)",
+    ...(structured.qualificationRequirements?.length
+      ? structured.qualificationRequirements.map(
+          (x) =>
+            `- ${x.summary}${x.criteriaNumbers ? ` _(${x.criteriaNumbers})_` : ""}\n  > ${x.evidence || "—"}`,
+        )
+      : ["- _(в корпусе не выделен раздел квалификации с цитатой)_"]),
+    "",
     "## Матрица требований (строки только с цитатой из текста)",
     formatAnalysisMatrixBullets(structured),
     "",
@@ -453,7 +743,8 @@ export function formatIceTradeAnalysisForTelegram(r) {
       .join("\n\n");
   }
   const inL = "inputsFolderWebViewLink" in r ? r.inputsFolderWebViewLink : undefined;
-  const requiredDocuments = buildRequiredDocumentsList(r.structured);
+  const corpus = "corpus" in r && typeof r.corpus === "string" ? r.corpus : undefined;
+  const requiredDocuments = buildRequiredDocumentsList(r.structured, { corpus });
   return formatDocumentCompositionStep1Telegram(r.structured, requiredDocuments, inL);
 }
 
@@ -621,13 +912,20 @@ export async function analyzeTenderAfterBootstrap(userRootId, tenderId, opts = {
     "- **Резидент РБ:** обе наши организации (**ГС Ритейл** и **Финсельват**) — **резиденты Республики Беларусь**. **Не включай** выписку из торгового реестра и иные документы **только для нерезидентов**. Если в КД даны ветки «резидент / нерезидент», отражай **только ветку резидента** — документы, **явно** указанные для резидентов (свидетельство о гос. регистрации и т.д.), с дословной цитатой из КД.",
     "- **Не производители:** обе организации — **не производители**. В КД с ветками «производитель / представитель» включай **только ветку представителя** (дилерское, агентское, комиссионное соглашение). **Не включай** справку ТПП и документы **только для производителей**.",
     "- **В составе КП, не отдельно:** «Условия оплаты» и «Гарантийные обязательства» **не выноси** отдельными пунктами чеклиста — они входят в коммерческое предложение (раздел о стоимости и условиях). Включай только если заказчик требует **отдельный самостоятельный документ** с таким названием (редко; с дословной цитатой).",
-    "- **Референс-лист:** только при **явном** требовании отдельного документа «референс-лист» / «reference list» в КД. Не путать с критериями «аналогичный опыт» без отдельного документа.",
-    "- **Декларации соответствия:** только если **дословно** названы в КД или ТЗ. Не предполагай по фразе «документы по ТЗ» без конкретного названия.",
+    "- **Референс-лист:** только при **явном** требовании отдельного документа «референс-лист» / «reference list» в КД. Не путать с критериями «аналогичный опыт» без отдельного документа. Поле **name** не может быть «Референс-лист», если в **evidence** нет слова «референс».",
+    "- **Декларации соответствия:** только если **дословно** названы в КД или ТЗ. Не предполагай по фразе «документы по ТЗ» без конкретного названия. Поле **name** не может быть «Декларации соответствия», если в **evidence** нет формулировки «декларация … соответствия».",
+    "- **Согласованность name и evidence:** **name** каждого элемента должен описывать **тот же** документ, что и цитата **evidence**; не подставляй типовое название, не совпадающее с текстом цитаты.",
     "- **Товары не из СНГ (Китай и др.):** если в п.3.2 КД есть ветка про сертификат о происхождении для государств, не являющихся участниками СНГ — включи «Сертификат о происхождении товара» в managerMustProvide (ветка **резидента РБ**: ТПП РБ или её УП; с дословной цитатой).",
     "- **П.3.2 КД:** разделы «Документы и сведения…» — **каждый нумерованный подпункт** = отдельный элемент чеклиста. П. «документы, указанные в ТЗ» — извлекай **конкретные** названия из текста ТЗ (декларации, таблица соответствия и т.д.), не оставляй абстрактной фразой. Заявление о согласии с условиями КД/проекта договора → lenaCanPrepare.",
+    "- **qualificationRequirements[]** — **отдельно** от lenaCanPrepare/managerMustProvide: критерии **квалификации** (опыт, проекты, специалисты, суммы, сроки). Ищи блоки «квалификационные требования», «подтверждение квалификации», «перечень документов… квалификации», нумерованные критерии с «должен иметь», «не менее», «предоставить копии». Поле **summary** — 1–3 предложения на русском: сохрани **числа, «или/либо», валюту**; **не** заменяй на «референс-лист» или другие эталонные названия. Поле **evidence** — дословная цитата 15+ символов. **criteriaNumbers** — ключевые цифры/пороги одной строкой или null. **Не используй** канонические name из списка типов документов. Критерии квалификации с договорами/актами/дипломами → сюда, а не в managerMustProvide как «Референс-лист». Пустой массив, если в корпусе нет раздела квалификации.",
+    "- **cpCompositionRequirements[]** — **отдельно**: разделы/приложения **коммерческого предложения**, которые заказчик **явно** требует в КД (структура КП, обязательные разделы, приложения к КП). Поле **summary** — что именно включить в КП; **evidence** — дословная цитата 15+ символов. **Не выдумывай** разделы, которых нет в корпусе. Пустой массив, если структура КП не детализирована.",
+    "- **bankReferenceDateRule** — объект или null: правило **срока/даты** справки из банка из КД (например «не ранее 1-го числа месяца, предшествующего месяцу окончания приёма заявок»). Поля **summary** (кратко по-русски), **evidence** (цитата 15+ символов). **computedDeadlineHint** — null (вычислится позже).",
+    "- **balanceSheetPeriodRule** — объект или null: правило **отчётного периода** бухгалтерского баланса (например «за последний отчётный квартал»). Поля **summary**, **evidence** (цитата 15+ символов). **computedPeriodHint** — null.",
+    "- **incomeStatementPeriodRule** — объект или null: то же для **ОФР** / отчёта о финансовых результатах. Поля **summary**, **evidence**. **computedPeriodHint** — null.",
+    "- **attachedFormHint** (опционально в lenaCanPrepare): имя файла из inputs, если КД ссылается на приложение-форму («форма заявки», «приложение N»); только если имя/файл есть в корпусе или списке файлов — не выдумывай.",
     "Если фрагментов мало — пустые массивы и nullы нормальны.",
     "Форма ответа (ключи строго):",
-    '{"tenderTitle":string|null,"tenderTitleEvidence":string,"sumOrBudget":string|null,"sumOrBudgetEvidence":string,"submissionOverview":string|null,"submissionOverviewQuotes":string[],"submissionMethod":string|null,"submissionMethodEvidence":string,"submissionDeadline":string|null,"submissionDeadlineEvidence":string,"lenaCanPrepare":[{"name":string,"basis":string,"evidence":string}],"managerMustProvide":[{"name":string,"reason":string,"criteria":string|null,"evidence":string}]}',
+    '{"tenderTitle":string|null,"tenderTitleEvidence":string,"sumOrBudget":string|null,"sumOrBudgetEvidence":string,"submissionOverview":string|null,"submissionOverviewQuotes":string[],"submissionMethod":string|null,"submissionMethodEvidence":string,"submissionDeadline":string|null,"submissionDeadlineEvidence":string,"qualificationRequirements":[{"summary":string,"evidence":string,"criteriaNumbers":string|null}],"cpCompositionRequirements":[{"summary":string,"evidence":string}],"bankReferenceDateRule":{"summary":string,"evidence":string,"computedDeadlineHint":string|null}|null,"balanceSheetPeriodRule":{"summary":string,"evidence":string,"computedPeriodHint":string|null}|null,"incomeStatementPeriodRule":{"summary":string,"evidence":string,"computedPeriodHint":string|null}|null,"lenaCanPrepare":[{"name":string,"basis":string,"evidence":string,"attachedFormHint":string|null}],"managerMustProvide":[{"name":string,"reason":string,"criteria":string|null,"evidence":string}]}',
   ].join(" ");
 
   const userContent = [
@@ -648,6 +946,11 @@ export async function analyzeTenderAfterBootstrap(userRootId, tenderId, opts = {
     submissionOverview: null,
     submissionMethod: null,
     submissionDeadline: null,
+    qualificationRequirements: /** @type {{ summary: string; evidence: string; criteriaNumbers?: string }[]} */ ([]),
+    cpCompositionRequirements: /** @type {{ summary: string; evidence: string }[]} */ ([]),
+    bankReferenceDateRule: null,
+    balanceSheetPeriodRule: null,
+    incomeStatementPeriodRule: null,
     lenaCanPrepare: /** @type {{ name: string; basis: string }[]} */ ([]),
     managerMustProvide: /** @type {{ name: string; reason: string; criteria: string }[]} */ ([]),
   };
@@ -721,6 +1024,7 @@ export async function analyzeTenderAfterBootstrap(userRootId, tenderId, opts = {
   return {
     ok: true,
     structured,
+    corpus,
     notParsedFiles,
     ragUsed,
     usedParsedPipeline,

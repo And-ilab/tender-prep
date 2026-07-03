@@ -318,6 +318,7 @@ function tenderFlowPhase(p) {
 function structuredToHintsCorpus(structured) {
   const parts = [
     structured.submissionOverview,
+    ...(structured.qualificationRequirements ?? []).map((x) => `${x.summary} ${x.evidence}`),
     ...structured.lenaCanPrepare.map((x) => `${x.name} ${x.basis}`),
     ...structured.managerMustProvide.map((x) => `${x.name} ${x.reason}`),
   ].filter(Boolean);
@@ -1362,6 +1363,7 @@ async function sendRefinedChecklistAfterOrgSelect(chatId, chainReplyTo, pending,
     pending.analysisStructured,
     pending.requiredDocuments,
     pending.opts,
+    { corpus: pending.analysisHintsCorpus ?? "" },
   );
   pending.uploadLinks = bundle.uploadTargets;
   pending.phase = "awaiting_manager_docs";

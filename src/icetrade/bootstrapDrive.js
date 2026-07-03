@@ -17,6 +17,7 @@ import {
 import { iceTradePythonFetchMode, runPythonIceTradeFetch } from "./bootstrapPythonSidecar.js";
 import { extractAttachmentCandidates, enrichAttachmentCandidatesLinkText, isIceTradeLoginWallHtml, isIceTradePlatformHelpAttachment } from "./scrapeAttachments.js";
 import { buildIceTradeImportSnapshot, importSnapshotToJson } from "./importPageMeta.js";
+import { expandArchivesInInputs } from "./expandInputsArchives.js";
 
 const VIEW_PAGE = (/** @type {string} */ id) => `https://icetrade.by/tenders/all/view/${id}`;
 
@@ -695,6 +696,22 @@ export async function bootstrapIceTradeToDrive(userRootId, urlOrText, opts = {})
     } catch (e) {
       errors.push(`${fileUrl}: ${e instanceof Error ? e.message : String(e)}`);
     }
+  }
+
+  try {
+    const ax = await expandArchivesInInputs(inputsId);
+    for (const u of ax.uploaded) {
+      uploaded.push(u);
+      existing.add(u.name);
+    }
+    for (const e of ax.errors) errors.push(`Архив: ${e}`);
+    if (ax.expandedCount > 0) {
+      errors.push(
+        `**Архивы:** распаковано **${ax.expandedCount}**, загружено в inputs **${ax.uploaded.length}** файл(ов).`,
+      );
+    }
+  } catch (e) {
+    errors.push(`Распаковка архивов в inputs: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");

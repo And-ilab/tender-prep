@@ -22,6 +22,7 @@ export const MANAGER_PRICE_QUOTE_FILENAME = "lena-manager-price-quote.md";
  * @param {{
  *   lenaCanPrepare: { name: string; basis: string }[],
  *   managerMustProvide: { name: string; reason: string; criteria: string }[],
+ *   cpCompositionRequirements?: { summary: string; evidence?: string }[],
  * }} structured
  */
 function formatMatrixForPrep(structured) {
@@ -50,6 +51,19 @@ function formatMatrixForPrep(structured) {
     "|---|---|---|---|",
     ...body,
   ].join("\n");
+}
+
+/**
+ * @param {Parameters<typeof formatMatrixForPrep>[0]} structured
+ */
+function formatCpCompositionForPrep(structured) {
+  const items = structured.cpCompositionRequirements ?? [];
+  if (!items.length) {
+    return "_Стандартная структура org-шаблона коммерческого предложения (отдельные разделы в КД не выделены)._";
+  }
+  return items
+    .map((x) => `- **${String(x.summary ?? "").trim()}**\n  > ${String(x.evidence ?? "—").trim()}`)
+    .join("\n");
 }
 
 /**
@@ -119,6 +133,10 @@ export function buildPreparationPromptMarkdown({ tenderId, structured, corpus, g
     "## Матрица требований (только с опорой на текст inputs)",
     "",
     formatMatrixForPrep(structured),
+    "",
+    "## Состав КП по документам заказчика",
+    "",
+    formatCpCompositionForPrep(structured),
     "",
     "## Что закрывает менеджер / внешние данные (по тексту закупки)",
     structured.managerMustProvide.length
