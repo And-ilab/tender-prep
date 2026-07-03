@@ -7,6 +7,14 @@ import {
   filterPreOrgChecklistDocuments,
   formatDocumentCompositionStep1Telegram,
   formatQualificationRequirementsTelegram,
+  formatQualificationRequirementTelegramBlock,
+  parseQualificationConfirmation,
+  dedupeQualificationRequirements,
+  splitMergedQualificationRequirements,
+  filterStep1SubmissionDocuments,
+  documentCoveredByQualificationProof,
+  collectQualificationProofLabels,
+  looksLikeQualificationProofDocumentItem,
   relocateQualificationMislabels,
   isExplicitComplianceStatementRequirement,
   isExplicitConformityDeclarationRequirement,
@@ -361,10 +369,22 @@ describe("formatQualificationRequirementsTelegram", () => {
       qualificationRequirements: [
         {
           summary:
-            "Предоставить не менее 3 копий договоров и актов по проектам с ИИ; стоимость каждого не менее 180 000 бел. руб. либо один проект не менее 540 000 бел. руб.",
+            "Опыт на рынке IT/ИИ не менее 3 лет; не менее 3 проектов с ИИ по 180 000 BYN либо один проект от 540 000 BYN",
           evidence:
-            "не менее 3 проектов с договорами и актами выполненных работ стоимостью не менее 180000 белорусских рублей либо один проект не менее 540000",
+            "опыт работы на рынке информационных технологий не менее 3 лет, не менее 3 проектов с договорами и актами выполненных работ стоимостью не менее 180000 белорусских рублей либо один проект не менее 540000",
           criteriaNumbers: "180000; 540000; 3 проекта",
+          confirmationDocuments: ["копии договоров", "акты выполненных работ"],
+        },
+        {
+          summary:
+            "В штате не менее 2 специалистов с высшим образованием, опытом коммерческой разработки от 5 лет и участием в 2+ проектах с ИИ",
+          evidence:
+            "наличие в штате не менее двух работников с высшим техническим образованием, опытом коммерческой разработки не менее 5 лет, опытом участия не менее чем в 2 проектах с применением технологий искусственного интеллекта с предоставлением копий дипломов о высшем образовании, резюме специалистов, а также информации, подтверждающей их опыт (выписки из трудовых книжек или проектная документация)",
+          confirmationDocuments: [
+            "копии дипломов о высшем образовании",
+            "резюме специалистов",
+            "выписки из трудовых книжек или проектная документация",
+          ],
         },
       ],
       lenaCanPrepare: [],
@@ -372,8 +392,165 @@ describe("formatQualificationRequirementsTelegram", () => {
     };
     const text = formatQualificationRequirementsTelegram(structured);
     assert.match(text, /Требования к квалификации/);
-    assert.match(text, /180 000/);
+    assert.match(text, /180 000|180000/);
+    assert.match(text, /\[.*540000.*\]/);
+    assert.match(text, /дипломов о высшем образовании/);
+    assert.match(text, /подтвердить документами/);
+    assert.match(text, /- копии дипломов/);
     assert.doesNotMatch(text, /референс-лист/i);
+  });
+
+  it("parses confirmation documents from evidence when LLM omitted confirmationDocuments", () => {
+    const parsed = parseQualificationConfirmation(
+      "наличие в штате не менее двух работников с высшим техническим образованием с предоставлением копий дипломов о высшем образовании, резюме специалистов, а также выписки из трудовых книжек",
+    );
+    assert.match(parsed.criterionShort, /штате не менее двух/i);
+    assert.ok(parsed.confirmationDocuments.length >= 2);
+    const block = formatQualificationRequirementTelegramBlock({
+      summary: parsed.criterionShort,
+      evidence:
+        "наличие в штате не менее двух работников с высшим техническим образованием с предоставлением копий дипломов о высшем образовании, резюме специалистов, а также выписки из трудовых книжек",
+    });
+    assert.match(block, /\[.*штате не менее двух.*\]:/);
+    assert.match(block, /• .*дипломов/);
+  });
+
+  it("dedupes repeated qualification items with same evidence", () => {
+    const item = {
+      summary: "Кадры с опытом ИИ",
+      evidence: "не менее двух работников с опытом участия в проектах с ИИ",
+    };
+    const deduped = dedupeQualificationRequirements([item, item, item]);
+    assert.equal(deduped.length, 1);
+  });
+
+  it("splits merged experience and staff qualification criteria", () => {
+    const merged = {
+      summary:
+        "Опыт на рынке IT не менее 3 лет и наличие в штате не менее двух работников с высшим образованием",
+      evidence:
+        "опыт работы на рынке информационных технологий не менее 3 (трех) лет, наличие в штате не менее двух работников с высшим техническим образованием с предоставлением копий дипломов",
+    };
+    const split = splitMergedQualificationRequirements([merged]);
+    assert.equal(split.length, 2);
+  });
+
+  it("1352058 step1 excludes qual-proof docs from Кроме того к подаче", () => {
+    const cp = { ...normalizeToCanonicalDocument("Коммерческое предложение"), source: "lena" };
+    const reg = {
+      ...normalizeToCanonicalDocument("Свидетельство о государственной регистрации"),
+      source: "manager",
+    };
+    const poa = { ...normalizeToCanonicalDocument("Доверенность на подачу"), source: "manager" };
+    const compliance = {
+      ...normalizeToCanonicalDocument("Заявление о соответствии требованиям"),
+      source: "manager",
+    };
+    const resume = {
+      ...normalizeToCanonicalDocument("Резюме специалистов"),
+      source: "manager",
+    };
+    const labor = {
+      ...normalizeToCanonicalDocument("Выписки из трудовых книжек"),
+      source: "manager",
+    };
+    const structured = {
+      tenderTitle: null,
+      sumOrBudget: null,
+      submissionOverview: null,
+      submissionMethod: null,
+      submissionDeadline: null,
+      qualificationRequirements: [
+        {
+          summary: "В штате не менее 2 специалистов с опытом ИИ",
+          evidence:
+            "наличие в штате не менее двух работников с предоставлением копий дипломов, резюме специалистов, выписки из трудовых книжек",
+          confirmationDocuments: [
+            "копии дипломов о высшем образовании",
+            "резюме специалистов",
+            "выписки из трудовых книжек",
+          ],
+        },
+      ],
+      lenaCanPrepare: [{ name: "Коммерческое предложение", basis: "п.3.2", evidence: "коммерческое предложение" }],
+      managerMustProvide: [
+        { name: "Свидетельство о государственной регистрации", reason: "п.3.2", criteria: "—", evidence: "свидетельство о государственной регистрации" },
+        { name: "Доверенность на подачу", reason: "п.3.2", criteria: "—", evidence: "доверенность" },
+        { name: "Заявление о соответствии требованиям", reason: "п.3.2", criteria: "—", evidence: "заявление о соответствии требованиям" },
+        { name: "Резюме специалистов", reason: "квалификация", criteria: "—", evidence: "резюме специалистов" },
+        { name: "Выписки из трудовых книжек", reason: "квалификация", criteria: "—", evidence: "выписки из трудовых книжек" },
+      ],
+    };
+    const required = [cp, reg, poa, compliance, resume, labor];
+    assert.equal(documentCoveredByQualificationProof(resume, collectQualificationProofLabels(structured)), true);
+    assert.equal(filterStep1SubmissionDocuments(required, structured).length, 4);
+    const text = formatDocumentCompositionStep1Telegram(structured, required, undefined);
+    assert.match(text, /Кроме того к подаче/);
+    assert.match(text, /Коммерческое предложение/);
+    assert.match(text, /Свидетельство о государственной регистрации/);
+    assert.doesNotMatch(text, /К подаче:/);
+    assert.doesNotMatch(text, /\n- Резюме специалистов/);
+    assert.doesNotMatch(text, /\n- Выписки из трудовых книжек/);
+  });
+
+  it("drops confirmation-only qualification duplicates into proof documents section", () => {
+    const structured = {
+      tenderTitle: null,
+      sumOrBudget: null,
+      submissionOverview: null,
+      submissionMethod: null,
+      submissionDeadline: null,
+      qualificationRequirements: [
+        {
+          summary: "Опыт на рынке IT/ИИ ≥3 лет; 3 проекта ≥180k BYN",
+          evidence: "опыт работы на рынке информационных технологий не менее 3 лет",
+          confirmationDocuments: ["копии договоров", "акты выполненных работ"],
+        },
+        {
+          summary:
+            "Факт реализации подтверждается копиями договоров и актов выполненных работ",
+          evidence:
+            "факт реализации и внедрения подтверждается копиями договоров и актов выполненных работ",
+        },
+        {
+          summary:
+            "Предоставление копий дипломов, резюме специалистов, выписки из трудовых книжек",
+          evidence:
+            "с предоставлением копий дипломов о высшем образовании, резюме специалистов, а также выписки из трудовых книжек",
+        },
+      ],
+      lenaCanPrepare: [],
+      managerMustProvide: [],
+    };
+    const text = formatQualificationRequirementsTelegram(structured);
+    assert.match(text, /^1\. /m);
+    assert.doesNotMatch(text, /^2\. Факт реализации/m);
+    assert.match(text, /подтвердить документами/);
+    assert.match(text, /- .*договор/);
+    assert.match(text, /- .*резюме/i);
+  });
+
+  it("relocateQualificationMislabels moves qual-proof other items out of managerMustProvide", () => {
+    const structured = relocateQualificationMislabels({
+      tenderTitle: null,
+      sumOrBudget: null,
+      submissionOverview: null,
+      submissionMethod: null,
+      submissionDeadline: null,
+      qualificationRequirements: [],
+      lenaCanPrepare: [],
+      managerMustProvide: [
+        {
+          name: "Резюме специалистов",
+          reason: "квалификация",
+          criteria: "—",
+          evidence: "резюме специалистов с опытом участия не менее чем в 2 проектах с ИИ",
+        },
+      ],
+    });
+    assert.equal(structured.managerMustProvide.length, 0);
+    assert.equal(structured.qualificationRequirements.length, 1);
+    assert.ok(looksLikeQualificationProofDocumentItem({ name: "Резюме специалистов", evidence: "резюме квалификация штат" }));
   });
 });
 
@@ -391,7 +568,7 @@ describe("pre-org checklist filtering", () => {
     assert.equal(filtered[0].id, "technical_proposal");
   });
 
-  it("step 1 shows full K podache list including org-bound documents", () => {
+  it("step 1 shows Кроме того к подаче including org-bound documents", () => {
     const bank = { ...normalizeToCanonicalDocument("Справка из банка"), source: "manager" };
     const text = formatDocumentCompositionStep1Telegram(
       {
@@ -414,6 +591,7 @@ describe("pre-org checklist filtering", () => {
       undefined,
     );
     assert.match(text, /Требования к квалификации/);
+    assert.match(text, /Кроме того к подаче/);
     assert.match(text, /Справка из банка/);
     assert.match(text, /не ранее 1-го числа/i);
     assert.match(text, /после выбора.*участника/i);

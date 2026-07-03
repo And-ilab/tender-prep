@@ -34,6 +34,8 @@ import {
   shouldIncludeChecklistItem,
   stripRequirementParentheticals,
   relocateQualificationMislabels,
+  dedupeQualificationRequirements,
+  formatQualificationRequirementTelegramBlock,
 } from "../analysis/documentChecklist.js";
 import { computeBankReferenceMaxDateIso } from "../analysis/verifyDocumentAvailability.js";
 import { computeLastReportingQuarterHint } from "../analysis/identifyUploadedDocuments.js";
@@ -269,11 +271,20 @@ function normalizeAnalysis(o) {
         typeof /** @type {{ criteriaNumbers?: string }} */ (x).criteriaNumbers === "string"
           ? x.criteriaNumbers.trim()
           : "";
+      /** @type {string[]} */
+      const confirmationDocuments = [];
+      const confRaw = /** @type {{ confirmationDocuments?: unknown }} */ (x).confirmationDocuments;
+      if (Array.isArray(confRaw)) {
+        for (const d of confRaw) {
+          if (typeof d === "string" && d.trim().length > 3) confirmationDocuments.push(d.trim());
+        }
+      }
       if (summary) {
         qualificationRequirements.push({
           summary,
           evidence,
           criteriaNumbers: criteriaNumbers || undefined,
+          confirmationDocuments: confirmationDocuments.length ? confirmationDocuments : undefined,
         });
       }
     }
@@ -388,13 +399,17 @@ function passesQualificationGrounding(x, corpus) {
  * @param {string} corpus
  */
 function filterQualificationRequirements(items, corpus) {
-  return items
+  const filtered = items
     .filter((x) => passesQualificationGrounding(x, corpus))
-    .map(({ summary, evidence, criteriaNumbers }) => ({
+    .map(({ summary, evidence, criteriaNumbers, confirmationDocuments }) => ({
       summary: summary.trim(),
       evidence: String(evidence ?? "").trim(),
       criteriaNumbers: criteriaNumbers?.trim() || undefined,
+      confirmationDocuments: Array.isArray(confirmationDocuments)
+        ? confirmationDocuments.map((d) => String(d).trim()).filter((d) => d.length > 3)
+        : undefined,
     }));
+  return dedupeQualificationRequirements(filtered);
 }
 
 /**
@@ -710,9 +725,8 @@ function buildAnalysisMarkdown(viewId, structured, notParsedFiles, ragUsed, used
     "",
     "## Требования к квалификации (саммари с цитатами)",
     ...(structured.qualificationRequirements?.length
-      ? structured.qualificationRequirements.map(
-          (x) =>
-            `- ${x.summary}${x.criteriaNumbers ? ` _(${x.criteriaNumbers})_` : ""}\n  > ${x.evidence || "—"}`,
+      ? dedupeQualificationRequirements(structured.qualificationRequirements).map(
+          (x) => formatQualificationRequirementTelegramBlock(x).replace(/^- /, ""),
         )
       : ["- _(в корпусе не выделен раздел квалификации с цитатой)_"]),
     "",
@@ -920,7 +934,8 @@ export async function analyzeTenderAfterBootstrap(userRootId, tenderId, opts = {
     "- **Согласованность name и evidence:** **name** каждого элемента должен описывать **тот же** документ, что и цитата **evidence**; не подставляй типовое название, не совпадающее с текстом цитаты.",
     "- **Товары не из СНГ (Китай и др.):** если в п.3.2 КД есть ветка про сертификат о происхождении для государств, не являющихся участниками СНГ — включи «Сертификат о происхождении товара» в managerMustProvide (ветка **резидента РБ**: ТПП РБ или её УП; с дословной цитатой).",
     "- **П.3.2 КД:** разделы «Документы и сведения…» — **каждый нумерованный подпункт** = отдельный элемент чеклиста. П. «документы, указанные в ТЗ» — извлекай **конкретные** названия из текста ТЗ (декларации, таблица соответствия и т.д.), не оставляй абстрактной фразой. Заявление о согласии с условиями КД/проекта договора → lenaCanPrepare.",
-    "- **qualificationRequirements[]** — **отдельно** от lenaCanPrepare/managerMustProvide: критерии **квалификации** (опыт, проекты, специалисты, суммы, сроки). Ищи блоки «квалификационные требования», «подтверждение квалификации», «перечень документов… квалификации», нумерованные критерии с «должен иметь», «не менее», «предоставить копии». Поле **summary** — 1–3 предложения на русском: сохрани **числа, «или/либо», валюту**; **не** заменяй на «референс-лист» или другие эталонные названия. Поле **evidence** — дословная цитата 15+ символов. **criteriaNumbers** — ключевые цифры/пороги одной строкой или null. **Не используй** канонические name из списка типов документов. Критерии квалификации с договорами/актами/дипломами → сюда, а не в managerMustProvide как «Референс-лист». Пустой массив, если в корпусе нет раздела квалификации.",
+    "- **qualificationRequirements[]** — **отдельно** от lenaCanPrepare/managerMustProvide: критерии **квалификации** (опыт, проекты, специалисты, суммы, сроки). **Один элемент массива = один критерий** (не объединяй опыт и кадры в один пункт). Ищи блоки «квалификационные требования», «подтверждение квалификации», «перечень документов… квалификации», нумерованные критерии с «должен иметь», «не менее», «предоставить копии». Поле **summary** — **сжатое** описание подтверждаемого критерия (1 предложение): сохрани **числа, «или/либо», валюту**; **без** перечня подтверждающих документов. Поле **evidence** — **полный** дословный текст критерия из КД (15+ символов), включая формулировку порога. Поле **confirmationDocuments** — массив строк: **чем подтверждается** критерий (каждый элемент — один вид документа/сведений, например «копии договоров», «акты выполненных работ», «дипломы о высшем образовании»). **criteriaNumbers** — ключевые цифры/пороги одной строкой или null. **Не используй** канонические name из списка типов документов. Критерии квалификации с договорами/актами/дипломами → сюда, а не в managerMustProvide как «Референс-лист». Пустой массив, если в корпусе нет раздела квалификации.",
+    "- **Не дублируй квалификацию в managerMustProvide:** документы, которые **только** подтверждают квалификацию (копии договоров и актов по опыту, дипломы, резюме специалистов, выписки из трудовых книжек, проектная документация по кадрам) — **только** в qualificationRequirements[].confirmationDocuments; **не** включай их отдельными строками managerMustProvide, если они уже описаны в блоке квалификации.",
     "- **cpCompositionRequirements[]** — **отдельно**: разделы/приложения **коммерческого предложения**, которые заказчик **явно** требует в КД (структура КП, обязательные разделы, приложения к КП). Поле **summary** — что именно включить в КП; **evidence** — дословная цитата 15+ символов. **Не выдумывай** разделы, которых нет в корпусе. Пустой массив, если структура КП не детализирована.",
     "- **bankReferenceDateRule** — объект или null: правило **срока/даты** справки из банка из КД (например «не ранее 1-го числа месяца, предшествующего месяцу окончания приёма заявок»). Поля **summary** (кратко по-русски), **evidence** (цитата 15+ символов). **computedDeadlineHint** — null (вычислится позже).",
     "- **balanceSheetPeriodRule** — объект или null: правило **отчётного периода** бухгалтерского баланса (например «за последний отчётный квартал»). Поля **summary**, **evidence** (цитата 15+ символов). **computedPeriodHint** — null.",
@@ -928,7 +943,7 @@ export async function analyzeTenderAfterBootstrap(userRootId, tenderId, opts = {
     "- **attachedFormHint** (опционально в lenaCanPrepare): имя файла из inputs, если КД ссылается на приложение-форму («форма заявки», «приложение N»); только если имя/файл есть в корпусе или списке файлов — не выдумывай.",
     "Если фрагментов мало — пустые массивы и nullы нормальны.",
     "Форма ответа (ключи строго):",
-    '{"tenderTitle":string|null,"tenderTitleEvidence":string,"sumOrBudget":string|null,"sumOrBudgetEvidence":string,"submissionOverview":string|null,"submissionOverviewQuotes":string[],"submissionMethod":string|null,"submissionMethodEvidence":string,"submissionDeadline":string|null,"submissionDeadlineEvidence":string,"qualificationRequirements":[{"summary":string,"evidence":string,"criteriaNumbers":string|null}],"cpCompositionRequirements":[{"summary":string,"evidence":string}],"bankReferenceDateRule":{"summary":string,"evidence":string,"computedDeadlineHint":string|null}|null,"balanceSheetPeriodRule":{"summary":string,"evidence":string,"computedPeriodHint":string|null}|null,"incomeStatementPeriodRule":{"summary":string,"evidence":string,"computedPeriodHint":string|null}|null,"lenaCanPrepare":[{"name":string,"basis":string,"evidence":string,"attachedFormHint":string|null}],"managerMustProvide":[{"name":string,"reason":string,"criteria":string|null,"evidence":string}]}',
+    '{"tenderTitle":string|null,"tenderTitleEvidence":string,"sumOrBudget":string|null,"sumOrBudgetEvidence":string,"submissionOverview":string|null,"submissionOverviewQuotes":string[],"submissionMethod":string|null,"submissionMethodEvidence":string,"submissionDeadline":string|null,"submissionDeadlineEvidence":string,"qualificationRequirements":[{"summary":string,"evidence":string,"criteriaNumbers":string|null,"confirmationDocuments":string[]}],"cpCompositionRequirements":[{"summary":string,"evidence":string}],"bankReferenceDateRule":{"summary":string,"evidence":string,"computedDeadlineHint":string|null}|null,"balanceSheetPeriodRule":{"summary":string,"evidence":string,"computedPeriodHint":string|null}|null,"incomeStatementPeriodRule":{"summary":string,"evidence":string,"computedPeriodHint":string|null}|null,"lenaCanPrepare":[{"name":string,"basis":string,"evidence":string,"attachedFormHint":string|null}],"managerMustProvide":[{"name":string,"reason":string,"criteria":string|null,"evidence":string}]}',
   ].join(" ");
 
   const userContent = [

@@ -20,9 +20,10 @@ import {
 
 /**
  * @typedef {Object} QualificationRequirement
- * @property {string} summary
- * @property {string} evidence
+ * @property {string} summary — краткое описание критерия (без перечня документов)
+ * @property {string} evidence — полный текст критерия из КД (цитата)
  * @property {string} [criteriaNumbers]
+ * @property {string[]} [confirmationDocuments] — чем подтверждается (по одному виду документа)
  */
 
 /**
@@ -175,6 +176,18 @@ export function looksLikeQualificationCriteriaItem(item) {
 }
 
 /**
+ * Документ служит только подтверждением квалификации (резюме, дипломы, трудовые и т.п.).
+ * @param {{ name?: string, reason?: string, criteria?: string, evidence?: string }} item
+ */
+export function looksLikeQualificationProofDocumentItem(item) {
+  const blob = `${item.name ?? ""} ${item.reason ?? ""} ${item.criteria ?? ""} ${item.evidence ?? ""}`;
+  return (
+    /резюме|трудов.{0,16}книж|диплом|копи\w*\s+договор|акт.{0,24}выполн|проектн.{0,24}документ/i.test(blob) &&
+    /квалификац|штат|опыт\s+участ|не\s+менее|работник/i.test(blob)
+  );
+}
+
+/**
  * @param {AnalysisStructured} structured
  * @returns {AnalysisStructured}
  */
@@ -186,19 +199,23 @@ export function relocateQualificationMislabels(structured) {
 
   for (const x of structured.managerMustProvide ?? []) {
     const n = normalizeToCanonicalDocument(stripRequirementParentheticals(x.name) || x.name);
-    if (
+    const mislabeledReference =
       (n.id === "reference_list" || (n.id === "other" && looksLikeQualificationCriteriaItem(x))) &&
       looksLikeQualificationCriteriaItem(x) &&
-      !isExplicitReferenceListRequirement(x)
-    ) {
+      !isExplicitReferenceListRequirement(x);
+    const qualProofOnly = n.id === "other" && looksLikeQualificationProofDocumentItem(x);
+
+    if (mislabeledReference || qualProofOnly) {
       const summary =
         (x.evidence?.trim() && x.evidence.trim().length > 20 ? x.evidence.trim() : null) ||
         (x.criteria && x.criteria !== "—" ? x.criteria : null) ||
         x.reason ||
         x.name;
+      const proofName = stripRequirementParentheticals(x.name) || x.name;
       qualificationRequirements.push({
-        summary,
+        summary: qualProofOnly && proofName.length <= 120 ? proofName : summary,
         evidence: x.evidence || summary,
+        confirmationDocuments: qualProofOnly && proofName ? [proofName] : undefined,
       });
       continue;
     }
@@ -505,16 +522,398 @@ export function buildRefinedChecklist(requiredDocuments, offerOrg, structured) {
 }
 
 /**
+ * @param {string} s
+ */
+function normalizeQualificationSpace(s) {
+  return String(s ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Разбивает текст критерия на суть и перечень подтверждающих документов (fallback без LLM-поля).
+ * @param {string} text
+ * @returns {{ criterionShort: string, confirmationDocuments: string[] }}
+ */
+export function parseQualificationConfirmation(text) {
+  const t = normalizeQualificationSpace(text);
+  if (!t) return { criterionShort: "", confirmationDocuments: [] };
+
+  const splitRe =
+    /(?:^|\s|[.;,])(?:подтвержда(?:ется|ются)|факт\s+(?:реализации\s+и\s+)?(?:внедрения\s+)?подтвержда(?:ется|ются)|с\s+предоставлением\s+(?:копий|документов|необходимых)|предоставить(?:\s+не\s+менее)?\s+(?:копий|документов)?)\s+/i;
+  const m = t.match(splitRe);
+  if (!m || m.index === undefined) {
+    return { criterionShort: t, confirmationDocuments: [] };
+  }
+
+  const criterionShort = t.slice(0, m.index).trim().replace(/[.;,\s]+$/, "");
+  const confirmPart = t.slice(m.index + m[0].length).trim();
+  return {
+    criterionShort: criterionShort || t,
+    confirmationDocuments: splitConfirmationDocumentList(confirmPart),
+  };
+}
+
+/**
+ * @param {string} text
+ * @returns {string[]}
+ */
+function splitConfirmationDocumentList(text) {
+  let s = normalizeQualificationSpace(text)
+    .replace(/^(?:копий|копии|документов|необходимых\s+документов)\s+/i, "")
+    .replace(/\.$/, "")
+    .trim();
+  if (!s) return [];
+
+  /** @type {string[]} */
+  const parts = [];
+  for (const chunk of s.split(
+    /\s*,\s*(?:а\s+также|и)\s+|\s*,\s*(?=резюме|выписк|коп|диплом|акт)|\s+и\s+(?=акт|диплом|резюме|выписк|коп)|\s*;\s+/i,
+  )) {
+    const piece = chunk.trim().replace(/^[.:]\s*/, "");
+    if (piece.length > 3) parts.push(piece);
+  }
+  if (!parts.length && s.length > 3) parts.push(s);
+  return parts;
+}
+
+/**
+ * @param {QualificationRequirement} item
+ * @returns {QualificationRequirement}
+ */
+export function enrichQualificationRequirementForDisplay(item) {
+  const evidence = normalizeQualificationSpace(item.evidence);
+  let summary = normalizeQualificationSpace(item.summary);
+  /** @type {string[]} */
+  let confirmationDocuments = (item.confirmationDocuments ?? [])
+    .map((d) => normalizeQualificationSpace(d))
+    .filter((d) => d.length > 3);
+
+  if (!confirmationDocuments.length) {
+    const fromEvidence = parseQualificationConfirmation(evidence);
+    const fromSummary = parseQualificationConfirmation(summary);
+    confirmationDocuments =
+      fromEvidence.confirmationDocuments.length >= fromSummary.confirmationDocuments.length
+        ? fromEvidence.confirmationDocuments
+        : fromSummary.confirmationDocuments;
+    if (fromEvidence.criterionShort && fromEvidence.confirmationDocuments.length) {
+      summary = fromEvidence.criterionShort;
+    } else if (fromSummary.criterionShort && fromSummary.confirmationDocuments.length) {
+      summary = fromSummary.criterionShort;
+    }
+  }
+
+  if (!summary && evidence) summary = evidence.slice(0, 160);
+  if (summary && evidence && normalizeQualificationSpace(summary) === normalizeQualificationSpace(evidence)) {
+    const parsed = parseQualificationConfirmation(evidence);
+    if (parsed.criterionShort) summary = parsed.criterionShort;
+  }
+
+  return {
+    ...item,
+    summary: summary || evidence,
+    evidence: evidence || summary,
+    confirmationDocuments: confirmationDocuments.length ? confirmationDocuments : undefined,
+  };
+}
+
+/**
+ * @param {QualificationRequirement[]} items
+ * @returns {QualificationRequirement[]}
+ */
+export function splitMergedQualificationRequirements(items) {
+  /** @type {QualificationRequirement[]} */
+  const out = [];
+  const staffMarker =
+    /(?:^|[.;]\s*|\s)(?:наличие\s+в\s+штате|в\s+штате\s+не\s+менее|не\s+менее\s+двух\s+работник)/i;
+  const experienceMarker =
+    /опыт\s+работ\w*\s+на\s+рынке|рынк\w*\s+информационн\w*\s+технолог|не\s+менее\s+3\s*(?:\(тр[её]х\)|тр[её]х|\d)?\s*(?:\(тр[её]х\)|лет|г\.)/i;
+
+  for (const item of items) {
+    const blob = normalizeQualificationSpace(item.evidence || item.summary);
+    const staffMatch = blob.match(staffMarker);
+    if (
+      staffMatch &&
+      staffMatch.index !== undefined &&
+      experienceMarker.test(blob) &&
+      staffMatch.index > 40
+    ) {
+      const experienceText = blob.slice(0, staffMatch.index).trim().replace(/[.;,\s]+$/, "");
+      const staffText = blob.slice(staffMatch.index).trim();
+      if (experienceText.length > 30 && staffText.length > 30) {
+        out.push({
+          ...item,
+          summary: item.summary && item.summary.length < experienceText.length ? item.summary : experienceText.slice(0, 220),
+          evidence: item.evidence && /опыт|проект|рынк/i.test(item.evidence) ? item.evidence : experienceText,
+          confirmationDocuments: item.confirmationDocuments?.filter((d) => /договор|акт|проект/i.test(d)),
+        });
+        out.push({
+          summary: staffText.slice(0, 220),
+          evidence: staffText,
+          confirmationDocuments: item.confirmationDocuments?.filter((d) =>
+            /диплом|резюме|трудов|проектн/i.test(d),
+          ),
+        });
+        continue;
+      }
+    }
+    out.push(item);
+  }
+  return out;
+}
+
+/**
+ * @param {QualificationRequirement[]} items
+ * @returns {QualificationRequirement[]}
+ */
+export function dedupeQualificationRequirements(items) {
+  const seen = new Set();
+  /** @type {QualificationRequirement[]} */
+  const out = [];
+  for (const raw of splitMergedQualificationRequirements(items)) {
+    const x = enrichQualificationRequirementForDisplay(raw);
+    const key = normalizeQualificationSpace(x.evidence || x.summary)
+      .toLowerCase()
+      .slice(0, 220);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(x);
+  }
+  return out;
+}
+
+/**
+ * @param {QualificationRequirement} item
+ */
+export function formatQualificationRequirementTelegramBlock(item) {
+  const enriched = enrichQualificationRequirementForDisplay(item);
+  const short = enriched.summary?.trim() || enriched.evidence?.trim() || "Критерий";
+  const full = enriched.evidence?.trim() || "";
+  const docs = enriched.confirmationDocuments ?? [];
+
+  let block = `- ${short}`;
+  if (full && normalizeQualificationSpace(full) !== normalizeQualificationSpace(short)) {
+    block += ` [${full}]`;
+  }
+  if (docs.length) {
+    block += ":\n" + docs.map((d) => `  • ${d.replace(/^[-•]\s*/, "")}`).join("\n");
+  } else {
+    block += ":\n  • _(подтверждающие документы не выделены — см. цитату)_";
+  }
+  return block;
+}
+
+/** Документы заявки, которые не считаются только подтверждением квалификации. */
+const STEP1_ALWAYS_INCLUDE_DOC_IDS = new Set([
+  "commercial_proposal",
+  "technical_proposal",
+  "application_form",
+  "state_registration_certificate",
+  "power_of_attorney",
+  "compliance_statement",
+  "written_consent_contract",
+  "bank_reference",
+  "balance_sheet",
+  "income_statement",
+  "reliability_letter",
+  "charter",
+  "founding_documents",
+  "dealer_representative_docs",
+  "certificate_of_origin",
+  "conformity_declarations",
+  "budget_debt_statement",
+  "warranty_letter",
+  "payment_terms",
+]);
+
+const QUALIFICATION_PROOF_KEYWORD_RE =
+  /резюме|трудов.{0,16}книж|диплом|договор|акт.{0,24}выполн|проектн.{0,24}документ/i;
+
+/**
+ * @param {AnalysisStructured} structured
+ * @returns {string[]}
+ */
+export function collectQualificationProofLabels(structured) {
+  return prepareQualificationForStep1Display(structured.qualificationRequirements ?? []).proofDocuments;
+}
+
+/**
+ * @param {NormalizedDoc} doc
+ * @param {string[]} proofLabels
+ */
+export function documentCoveredByQualificationProof(doc, proofLabels) {
+  if (!proofLabels.length) return false;
+  if (STEP1_ALWAYS_INCLUDE_DOC_IDS.has(doc.id)) return false;
+
+  const title = normalizeQualificationSpace(submissionDisplayTitle(doc)).toLowerCase();
+  const raw = normalizeQualificationSpace(doc.rawName || doc.title || "").toLowerCase();
+  const blob = `${title} ${raw}`;
+
+  if (doc.id === "reference_list") {
+    return proofLabels.some((p) => /договор|акт|опыт|проект/i.test(p));
+  }
+
+  if (!QUALIFICATION_PROOF_KEYWORD_RE.test(blob)) return false;
+
+  return proofLabels.some((proof) => {
+    const p = normalizeQualificationSpace(proof).toLowerCase();
+    if (!p) return false;
+    if (title.includes(p) || p.includes(title)) return true;
+    if (/резюме/.test(blob) && /резюме/.test(p)) return true;
+    if (/трудов/.test(blob) && /трудов/.test(p)) return true;
+    if (/диплом/.test(blob) && /диплом/.test(p)) return true;
+    if (/договор/.test(blob) && /договор/.test(p)) return true;
+    if (/акт/.test(blob) && /акт/.test(p)) return true;
+    if (/проектн/.test(blob) && /проектн/.test(p)) return true;
+    return false;
+  });
+}
+
+/**
+ * Список «Кроме того к подаче» — без документов, уже перечисленных в квалификации.
+ * @param {NormalizedDoc[]} requiredDocuments
+ * @param {AnalysisStructured} structured
+ */
+export function filterStep1SubmissionDocuments(requiredDocuments, structured) {
+  const proofLabels = collectQualificationProofLabels(structured);
+  if (!proofLabels.length) return requiredDocuments;
+  return requiredDocuments.filter((d) => !documentCoveredByQualificationProof(d, proofLabels));
+}
+
+/**
+ * Пункт только про подтверждающие документы без порога критерия — не отдельная строка квалификации.
+ * @param {QualificationRequirement} item
+ */
+export function isQualificationConfirmationOnlyItem(item) {
+  const enriched = enrichQualificationRequirementForDisplay(item);
+  const blob = normalizeQualificationSpace(`${enriched.summary} ${enriched.evidence}`);
+  const hasCriterion =
+    /не\s+менее|штат|опыт\s+работ|(?:\d+\s*)?(?:лет|г\.|руб|byn)|работник|проект\w*\s+.*(?:ии|и)/i.test(
+      blob,
+    );
+  if (hasCriterion) return false;
+  return (
+    /^(?:факт\s+(?:реализации|наличия)|предоставлени\w+\s+копий|подтвержда(?:ется|ются)|с\s+предоставлением)/i.test(
+      blob.trim(),
+    ) || (enriched.confirmationDocuments?.length ?? 0) > 0
+  );
+}
+
+/**
+ * @param {string[]} docs
+ */
+function dedupeProofDocStrings(docs) {
+  const seen = new Set();
+  /** @type {string[]} */
+  const out = [];
+  for (const raw of docs) {
+    const d = normalizeQualificationSpace(raw);
+    if (d.length <= 3) continue;
+    const key = normalizeQualificationSpace(d)
+      .toLowerCase()
+      .replace(/^коп(?:ии|ия|иями|ий)\s+/i, "")
+      .replace(/^акт(?:ов|ы)?\s+/i, "акт ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(d);
+  }
+  return out;
+}
+
+/**
+ * @param {QualificationRequirement[]} items
+ */
+export function prepareQualificationForStep1Display(items) {
+  /** @type {string[]} */
+  const extraProofDocs = [];
+  /** @type {QualificationRequirement[]} */
+  const criteriaRaw = [];
+  for (const item of items ?? []) {
+    if (isQualificationConfirmationOnlyItem(item)) {
+      const enriched = enrichQualificationRequirementForDisplay(item);
+      extraProofDocs.push(...(enriched.confirmationDocuments ?? []));
+      extraProofDocs.push(
+        ...parseQualificationConfirmation(enriched.evidence || enriched.summary).confirmationDocuments,
+      );
+      continue;
+    }
+    criteriaRaw.push(item);
+  }
+  const criteriaItems = dedupeQualificationRequirements(criteriaRaw);
+  const proofDocuments = dedupeProofDocStrings([
+    ...extraProofDocs,
+    ...criteriaItems.flatMap((x) => x.confirmationDocuments ?? []),
+  ]);
+  return { criteriaItems, proofDocuments };
+}
+
+/**
+ * @param {QualificationRequirement} item
+ * @param {number} index
+ */
+export function formatQualificationCriterionTelegramLine(item, index) {
+  const enriched = enrichQualificationRequirementForDisplay(item);
+  const short = enriched.summary?.trim() || enriched.evidence?.trim() || "Критерий";
+  const full = enriched.evidence?.trim() || "";
+  let line = `${index}. ${short}`;
+  if (full && normalizeQualificationSpace(full) !== normalizeQualificationSpace(short)) {
+    line += ` [${full}]`;
+  }
+  return line;
+}
+
+/**
+ * @param {string[]} proofDocuments
+ */
+export function formatQualificationProofDocumentsTelegram(proofDocuments) {
+  if (!proofDocuments.length) return "";
+  return [
+    "**Требования к квалификации подтвердить документами:**",
+    ...proofDocuments.map((d) => `- ${d.replace(/^[-•]\s*/, "")}`),
+  ].join("\n");
+}
+
+/**
  * @param {AnalysisStructured} structured
  */
 export function formatQualificationRequirementsTelegram(structured) {
-  const items = structured.qualificationRequirements ?? [];
-  if (!items.length) return "";
-  const lines = ["**Требования к квалификации:**"];
-  for (const x of items) {
-    lines.push(`- ${x.summary}`);
+  const { criteriaItems, proofDocuments } = prepareQualificationForStep1Display(
+    structured.qualificationRequirements ?? [],
+  );
+  if (!criteriaItems.length && !proofDocuments.length) return "";
+
+  /** @type {string[]} */
+  const blocks = [];
+  if (criteriaItems.length) {
+    blocks.push(
+      "**Требования к квалификации:**",
+      ...criteriaItems.map((x, i) => formatQualificationCriterionTelegramLine(x, i + 1)),
+    );
   }
-  return lines.join("\n");
+  const proofBlock = formatQualificationProofDocumentsTelegram(proofDocuments);
+  if (proofBlock) blocks.push(proofBlock);
+
+  // #region agent log
+  fetch("http://127.0.0.1:7273/ingest/0fbf9c34-aa58-4c41-8b66-36b66355e6e0", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "714167" },
+    body: JSON.stringify({
+      sessionId: "714167",
+      location: "documentChecklist.js:formatQualificationRequirementsTelegram",
+      message: "qualification telegram block rendered",
+      data: {
+        criteriaCount: criteriaItems.length,
+        proofDocCount: proofDocuments.length,
+        hasProofSection: Boolean(proofBlock),
+      },
+      hypothesisId: "Q1-Q3",
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {});
+  // #endregion
+  return blocks.join("\n");
 }
 
 /**
@@ -541,9 +940,32 @@ export function formatDocumentCompositionStep1Telegram(
     lines.push("");
   }
 
-  if (requiredDocuments.length) {
-    lines.push("**К подаче:**");
-    for (const d of requiredDocuments) {
+  const step1Documents = filterStep1SubmissionDocuments(requiredDocuments, structured);
+
+  // #region agent log
+  fetch("http://127.0.0.1:7273/ingest/0fbf9c34-aa58-4c41-8b66-36b66355e6e0", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "714167" },
+    body: JSON.stringify({
+      sessionId: "714167",
+      location: "documentChecklist.js:formatDocumentCompositionStep1Telegram",
+      message: "step1 composition rendered",
+      data: {
+        hasQualBlock: Boolean(qualBlock),
+        qualHasProofSection: /подтвердить документами/.test(qualBlock),
+        step1DocCount: step1Documents.length,
+        requiredDocCount: requiredDocuments.length,
+        step1Titles: step1Documents.map((d) => submissionDisplayTitle(d)).slice(0, 12),
+      },
+      hypothesisId: "Q2-Q4",
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {});
+  // #endregion
+
+  if (step1Documents.length) {
+    lines.push("**Кроме того к подаче:**");
+    for (const d of step1Documents) {
       let line = `- ${submissionDisplayTitle(d)}`;
       const periodHint = orgDocPeriodHintForStep1(structured, d.id);
       if (periodHint && (d.id === "bank_reference" || d.id === "balance_sheet" || d.id === "income_statement")) {
@@ -551,6 +973,12 @@ export function formatDocumentCompositionStep1Telegram(
       }
       lines.push(line);
     }
+    lines.push("");
+    lines.push("_После выбора участника — проверка наличия документов организации на Drive._");
+    lines.push("");
+  } else if (qualBlock) {
+    lines.push("**Кроме того к подаче:**");
+    lines.push("- _(дополнительных документов к подаче вне квалификации не выделено)_");
     lines.push("");
     lines.push("_После выбора участника — проверка наличия документов организации на Drive._");
     lines.push("");
