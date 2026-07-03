@@ -1164,15 +1164,31 @@ function stripAssistantMarkdownForTelegram(text) {
 }
 
 /**
+ * Чеклист step1/step2: **bold** и _italic_ → Telegram HTML parse_mode.
+ * @param {string} text
+ */
+function checklistMarkdownToTelegramHtml(text) {
+  return String(text ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+    .replace(/_([^_\n]+)_/g, "<i>$1</i>");
+}
+
+/**
  * @param {number} chatId
  * @param {number} [replyTo]
  * @param {string} text
- * @param {Record<string, unknown>} [replyMarkup] — объект **reply_markup** для Telegram (`{ inline_keyboard: … }`) или обёртка `{ reply_markup: … }` (обе формы поддерживаются)
- * @returns {Promise<number | undefined>} message_id отправленного сообщения
+ * @param {Record<string, unknown>} [replyMarkup]
+ * @param {{ parseMode?: "HTML" | "Markdown" }} [opts]
+ * @returns {Promise<number | undefined>}
  */
-async function sendText(chatId, replyTo, text, replyMarkup) {
+async function sendText(chatId, replyTo, text, replyMarkup, opts) {
   const max = 3900;
-  const cleaned = stripAssistantMarkdownForTelegram(text);
+  const parseMode = opts?.parseMode;
+  const cleaned =
+    parseMode === "HTML" || parseMode === "Markdown" ? String(text ?? "") : stripAssistantMarkdownForTelegram(text);
   const chunk = cleaned.length <= max ? cleaned : `${cleaned.slice(0, max)}\n\n…(обрезано)`;
   /** @type {Record<string, unknown>} */
   const body = {
@@ -1180,6 +1196,7 @@ async function sendText(chatId, replyTo, text, replyMarkup) {
     text: chunk,
     disable_web_page_preview: true,
   };
+  if (parseMode) body.parse_mode = parseMode;
   if (replyTo != null && replyTo !== undefined) body.reply_to_message_id = replyTo;
   if (typeof outboundMessageThreadId === "number") body.message_thread_id = outboundMessageThreadId;
   if (replyMarkup && typeof replyMarkup === "object") {
@@ -1211,12 +1228,13 @@ async function sendText(chatId, replyTo, text, replyMarkup) {
  * @param {number} [replyTo] — первая опора цепочки (напр. исходное сообщение со ссылкой IceTrade)
  * @param {string} text
  * @param {Record<string, unknown>} [replyMarkupLast] — только на последний чанк
+ * @param {{ parseMode?: "HTML" | "Markdown" }} [opts]
  * @returns {Promise<number | undefined>} message_id последнего отправленного чанка
  */
-async function sendTextChunks(chatId, replyTo, text, replyMarkupLast) {
+async function sendTextChunks(chatId, replyTo, text, replyMarkupLast, opts) {
   const max = 3800;
   if (text.length <= max) {
-    return sendText(chatId, replyTo, text, replyMarkupLast);
+    return sendText(chatId, replyTo, text, replyMarkupLast, opts);
   }
   let i = 0;
   let part = 0;
@@ -1235,6 +1253,7 @@ async function sendTextChunks(chatId, replyTo, text, replyMarkupLast) {
       chainTo,
       `${prefix}${slice}`,
       isLast ? replyMarkupLast : undefined,
+      opts,
     );
     if (typeof mid === "number") {
       chainTo = mid;
@@ -1340,7 +1359,10 @@ async function sendDocumentChecklistStep1(chatId, chainReplyTo, result, pToken) 
     uploadLinks: [],
   });
 
-  await sendTextChunks(chatId, chainReplyTo, result.step1Text, buildOrgSelectKeyboard(pToken));
+  const checklistHtml = checklistMarkdownToTelegramHtml(result.step1Text);
+  await sendTextChunks(chatId, chainReplyTo, checklistHtml, buildOrgSelectKeyboard(pToken), {
+    parseMode: "HTML",
+  });
   // #region agent log
   checklistDebug714167(
     "lena-bot.mjs:sendDocumentChecklistStep1",
@@ -1384,13 +1406,15 @@ async function sendRefinedChecklistAfterOrgSelect(chatId, chainReplyTo, pending,
   pending.ts = Date.now();
 
   const gateOn = !managerPriceGateDisabled();
+  const checklistOpts = { parseMode: /** @type {const} */ ("HTML") };
+  const checklistHtml = checklistMarkdownToTelegramHtml(bundle.text);
   if (!gateOn && bundle.uploadTargets.length === 0) {
-    await sendTextChunks(chatId, chainReplyTo, bundle.text, buildDocsDoneKeyboard(token));
+    await sendTextChunks(chatId, chainReplyTo, checklistHtml, buildDocsDoneKeyboard(token), checklistOpts);
     await handleManagerDocsDone(chatId, chainReplyTo, token, pending);
     return;
   }
 
-  await sendTextChunks(chatId, chainReplyTo, bundle.text, buildDocsDoneKeyboard(token));
+  await sendTextChunks(chatId, chainReplyTo, checklistHtml, buildDocsDoneKeyboard(token), checklistOpts);
 }
 
 /**
