@@ -171,16 +171,16 @@ export async function resolveDocumentFormSource(userRootId, offerOrg, doc, opts 
  */
 export function formatFormSourceTelegramHint(form) {
   if (form.formSource === "customer" && form.webViewLink) {
-    return ` _форма: из КД — [${form.fileName ?? "файл"}](${form.webViewLink})_`;
+    return ` — (форма: из КД — [${form.fileName ?? "файл"}](${form.webViewLink}))`;
   }
   if (form.formSource === "customer") {
-    return ` _форма: из КД (${form.fileName ?? "файл"})_`;
+    return ` — (форма: из КД — ${form.fileName ?? "файл"})`;
   }
   if (form.formSource === "template" && form.webViewLink) {
-    return ` _форма: шаблон org — [${form.fileName ?? "шаблон"}](${form.webViewLink})_`;
+    return ` — (форма: шаблон org — [${form.fileName ?? "шаблон"}](${form.webViewLink}))`;
   }
   if (form.formSource === "template") {
-    return ` _форма: шаблон org (${form.fileName ?? "шаблон"})_`;
+    return ` — (форма: шаблон org — ${form.fileName ?? "шаблон"})`;
   }
-  return " _форма: уточните по КД или `_lena/templates`_";
+  return " — (форма: уточните по КД или lena/templates)";
 }

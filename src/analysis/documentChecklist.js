@@ -247,6 +247,17 @@ export function isExplicitComplianceStatementRequirement(item) {
 }
 
 /**
+ * Техническое предложение — только при дословной формулировке в evidence.
+ * Не путать с «техническим образованием», «техническом задании», «технологий ИИ».
+ * @param {{ name?: string, basis?: string, reason?: string, criteria?: string, evidence?: string }} item
+ */
+export function isExplicitTechnicalProposalRequirement(item) {
+  const evidence = String(item.evidence ?? "").trim();
+  if (!evidence) return false;
+  return /техническ\S*\s+предлож\S*|тех\s*\.?\s*предлож\S*|техпредлож\S*/i.test(evidence);
+}
+
+/**
  * Дилерское/агентское с производителем — не путать с доверенностью на подачу.
  * @param {{ name?: string, basis?: string, reason?: string, criteria?: string, evidence?: string }} item
  */
@@ -362,6 +373,20 @@ export function shouldIncludeChecklistItem(item, normalized) {
     normalized.id === "dealer_representative_docs" &&
     !isExplicitDealerRepresentativeRequirement(item)
   ) {
+    return false;
+  }
+  if (normalized.id === "technical_proposal" && !isExplicitTechnicalProposalRequirement(item)) {
+    // #region agent log
+    checklistDebug714167(
+      "documentChecklist.js:shouldIncludeChecklistItem",
+      "technical_proposal filtered (no explicit evidence)",
+      {
+        name: String(item.name ?? item.reason ?? "").slice(0, 80),
+        evidence: String(item.evidence ?? "").slice(0, 120),
+      },
+      "TP1",
+    );
+    // #endregion
     return false;
   }
   return true;
@@ -1066,7 +1091,7 @@ export function formatRefinedChecklistStep2Telegram(
 
   lines.push("**Уже есть:**");
   if (!alreadyHave.length) {
-    lines.push("- _(пока ничего не найдено на Drive)_");
+    lines.push("- (пока ничего не найдено на Drive)");
   } else {
     for (const { doc, verify } of alreadyHave) {
       lines.push(`- ${submissionDisplayTitle(doc)}${formatVerifyTelegramSuffix(verify)}`);
@@ -1075,7 +1100,7 @@ export function formatRefinedChecklistStep2Telegram(
 
   lines.push("", "**Подготовлю сама:**");
   if (!lenaPrepare.length) {
-    lines.push("- _(нет пунктов с опорой в КД — уточните по документам.)_");
+    lines.push("- (нет пунктов с опорой в КД — уточните по документам.)");
   } else {
     for (const { doc, verify } of lenaPrepare) {
       const key = doc.id !== "other" ? doc.id : `other:${doc.rawName}`;
@@ -1085,7 +1110,7 @@ export function formatRefinedChecklistStep2Telegram(
         verify.status === "form_customer" || verify.status === "form_template"
           ? formatVerifyTelegramSuffix(verify)
           : verify.status === "lena_draft" && verify.note
-            ? ` — _${verify.note}_`
+            ? ` — (${verify.note})`
             : "";
       lines.push(`- ${submissionDisplayTitle(doc)}${formSuffix || verifySuffix}`);
     }
@@ -1093,7 +1118,7 @@ export function formatRefinedChecklistStep2Telegram(
 
   lines.push("", "**Нужно получить / догрузить:**");
   if (!needUpload.length) {
-    lines.push("- _(нет — переходите к условиям.)_");
+    lines.push("- (нет — переходите к условиям.)");
   } else {
     for (const { doc, verify } of needUpload) {
       const link = linkById.get(doc.id);

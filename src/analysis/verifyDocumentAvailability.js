@@ -542,6 +542,6 @@ export function formatVerifyTelegramSuffix(verify) {
   if (verify.webViewLink && verify.fileName) {
     return ` — [${verify.fileName}](${verify.webViewLink})`;
   }
-  if (verify.note) return ` — _${verify.note}_`;
+  if (verify.note) return ` — (${verify.note})`;
   return "";
 }

@@ -108,6 +108,10 @@ import {
 import { OFFER_ORG, runCommercialProposalDraftToDrive } from "../analysis/commercialProposalLlm.js";
 import { runTenderInputsExtractForTelegram } from "../parse/tenderInputsParseFlow.js";
 import { checklistDebug714167 } from "../debug/checklistDebug714167.js";
+import {
+  checklistMarkdownToTelegramHtml,
+  validateTelegramHtml,
+} from "./checklistTelegramHtml.js";
 import { buildRefinedChecklistTelegramBundle } from "../analysis/documentChecklist.js";
 import {
   classifyInputAttachmentSet,
@@ -1164,24 +1168,6 @@ function stripAssistantMarkdownForTelegram(text) {
 }
 
 /**
- * Чеклист step1/step2: **bold** и _italic_ → Telegram HTML parse_mode.
- * @param {string} text
- */
-function checklistMarkdownToTelegramHtml(text) {
-  let s = String(text ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-  s = s.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_m, label, url) => {
-    const safeUrl = url.replace(/&/g, "&amp;");
-    return `<a href="${safeUrl}">${label}</a>`;
-  });
-  s = s.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
-  s = s.replace(/_([^_\n]+)_/g, "<i>$1</i>");
-  return s;
-}
-
-/**
  * @param {number} chatId
  * @param {number} [replyTo]
  * @param {string} text
@@ -1442,6 +1428,7 @@ async function sendRefinedChecklistAfterOrgSelect(chatId, chainReplyTo, pending,
     const gateOn = !managerPriceGateDisabled();
     const checklistOpts = { parseMode: /** @type {const} */ ("HTML") };
     const checklistHtml = checklistMarkdownToTelegramHtml(bundle.text);
+    const htmlValidation = validateTelegramHtml(checklistHtml);
     // #region agent log
     checklistDebug714167(
       "lena-bot.mjs:sendRefinedChecklistAfterOrgSelect",
@@ -1449,6 +1436,9 @@ async function sendRefinedChecklistAfterOrgSelect(chatId, chainReplyTo, pending,
       {
         tenderId: pending.tenderId,
         htmlLen: checklistHtml.length,
+        htmlBytes: Buffer.byteLength(checklistHtml, "utf8"),
+        htmlValid: htmlValidation.ok,
+        htmlError: htmlValidation.ok ? null : htmlValidation,
         uploadTargetCount: bundle.uploadTargets.length,
       },
       "H3",

@@ -21,6 +21,7 @@ import {
   isExplicitConformityDeclarationRequirement,
   isExplicitDealerRepresentativeRequirement,
   isExplicitReferenceListRequirement,
+  isExplicitTechnicalProposalRequirement,
   isKpEmbeddedChecklistItem,
   isOrgBoundChecklistDocument,
   shouldIncludeChecklistItem,
@@ -83,6 +84,36 @@ describe("isExplicitConformityDeclarationRequirement", () => {
   });
 });
 
+describe("isExplicitTechnicalProposalRequirement", () => {
+  it("requires explicit technical proposal wording in evidence", () => {
+    assert.equal(
+      isExplicitTechnicalProposalRequirement({
+        name: "Техническое предложение",
+        evidence: "участник представляет техническое предложение по форме приложения 2",
+      }),
+      true,
+    );
+    assert.equal(
+      isExplicitTechnicalProposalRequirement({
+        name: "Техническое предложение",
+        evidence: "наличие в штате работников с высшим техническим образованием",
+      }),
+      false,
+    );
+    assert.equal(
+      isExplicitTechnicalProposalRequirement({
+        name: "Техническое предложение",
+        evidence: "опыт работы на рынке информационных технологий не менее 3 лет",
+      }),
+      false,
+    );
+    assert.equal(
+      isExplicitTechnicalProposalRequirement({ name: "Техническое предложение", basis: "п.3.2" }),
+      false,
+    );
+  });
+});
+
 describe("corpusRequiresNonCisOriginCertificate", () => {
   it("detects non-CIS origin branch in corpus", () => {
     const snippet =
@@ -93,6 +124,34 @@ describe("corpusRequiresNonCisOriginCertificate", () => {
 });
 
 describe("shouldIncludeChecklistItem", () => {
+  it("excludes technical proposal when LLM mislabels qual text (1352058-like)", () => {
+    const n = normalizeToCanonicalDocument("Техническое предложение");
+    assert.equal(
+      shouldIncludeChecklistItem(
+        {
+          name: "Техническое предложение",
+          evidence: "наличие в штате работников с высшим техническим образованием",
+        },
+        n,
+      ),
+      false,
+    );
+    assert.equal(
+      shouldIncludeChecklistItem(
+        {
+          name: "Техническое предложение",
+          evidence: "опыт работы на рынке информационных технологий не менее 3 лет",
+        },
+        n,
+      ),
+      false,
+    );
+    assert.equal(
+      shouldIncludeChecklistItem({ name: "Техническое предложение", basis: "п.3.2" }, n),
+      false,
+    );
+  });
+
   it("excludes KP-embedded documents", () => {
     const n = normalizeToCanonicalDocument("Условия оплаты");
     assert.equal(shouldIncludeChecklistItem({ name: "Условия оплаты" }, n), false);
@@ -201,7 +260,26 @@ describe("buildRequiredDocumentsList", () => {
     const ids = list.map((d) => d.id);
     assert.ok(!ids.includes("payment_terms"));
     assert.ok(!ids.includes("warranty_letter"));
-    assert.ok(ids.includes("technical_proposal"));
+    assert.ok(!ids.includes("technical_proposal"));
+  });
+
+  it("keeps technical proposal when evidence explicitly mentions it", () => {
+    const list = buildRequiredDocumentsList({
+      tenderTitle: null,
+      sumOrBudget: null,
+      submissionOverview: null,
+      submissionMethod: null,
+      submissionDeadline: null,
+      lenaCanPrepare: [
+        {
+          name: "Техническое предложение",
+          basis: "п.3.2",
+          evidence: "участник представляет техническое предложение по форме приложения 2",
+        },
+      ],
+      managerMustProvide: [],
+    });
+    assert.ok(list.some((d) => d.id === "technical_proposal"));
   });
 
   it("drops reference list when name says reference but evidence does not", () => {
