@@ -91,9 +91,31 @@ export function shouldShowInLenaPrepareBlock(doc, verify, structured) {
 async function listCompanySubfolderFiles(parentFolderId, offerOrg) {
   const subName = LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG[offerOrg];
   const companyFolderId = await findChildFolderId(parentFolderId, subName);
-  if (!companyFolderId) return [];
-  const items = await listChildren(companyFolderId);
-  return items.filter((f) => f.mimeType !== FOLDER_MIME);
+  const subfolderNames = new Set(Object.values(LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG));
+  /** @type {Map<string, { id?: string, name?: string, mimeType?: string }>} */
+  const byId = new Map();
+
+  const addFiles = (items) => {
+    for (const f of items) {
+      if (f.mimeType === FOLDER_MIME) continue;
+      const id = String(f.id ?? "");
+      if (!id) continue;
+      byId.set(id, f);
+    }
+  };
+
+  if (companyFolderId) {
+    addFiles(await listChildren(companyFolderId));
+  }
+
+  const rootItems = await listChildren(parentFolderId);
+  addFiles(
+    rootItems.filter(
+      (f) => f.mimeType !== FOLDER_MIME && !subfolderNames.has(String(f.name ?? "")),
+    ),
+  );
+
+  return [...byId.values()];
 }
 
 /**
@@ -107,6 +129,13 @@ export function findMatchingDriveFile(files, canonicalId) {
     if (!id) continue;
     if (fileMatchesCanonicalType(name, canonicalId) || name.toLowerCase().startsWith(`${canonicalId}__`)) {
       return { id, name };
+    }
+    const stem = name.replace(/\.[^.]+$/, "").trim();
+    if (stem) {
+      const normalized = normalizeToCanonicalDocument(stem);
+      if (normalized.id === canonicalId && normalized.id !== "other") {
+        return { id, name };
+      }
     }
   }
   return null;
@@ -392,13 +421,52 @@ export async function verifyDocumentItem(
   }
 
   if (doc.storage === "founding") {
-    const match =
+    let match =
       findFileForCanonicalId(ctx.foundingFiles, ctx.foundingIndex, doc.id) ??
       findMatchingDriveFile(ctx.foundingFiles, doc.id);
+    let matchedVia = match ? "founding" : null;
+    if (!match) {
+      match = findMatchingDriveFile(ctx.orgFiles, doc.id);
+      if (match) matchedVia = "org";
+    }
+    // #region agent log
+    checklistDebug714167(
+      "verifyDocumentAvailability.js:verifyDocumentItem:founding",
+      "founding doc verify",
+      {
+        docId: doc.id,
+        tenderId,
+        offerOrg,
+        matched: Boolean(match),
+        matchedVia,
+        matchName: match?.name ?? null,
+        foundingFiles: ctx.foundingFiles.map((f) => {
+          const name = String(f.name ?? "");
+          const stem = name.replace(/\.[^.]+$/, "").trim();
+          const norm = stem ? normalizeToCanonicalDocument(stem) : null;
+          return {
+            name,
+            fileMatches: fileMatchesCanonicalType(name, doc.id),
+            normalizeId: norm?.id ?? null,
+          };
+        }),
+      },
+      "H2-H3-H5",
+    );
+    // #endregion
     if (!match) {
       return { status: "missing", ...base, note: "нет файла в lena/founding-docs" };
     }
     const { webViewLink } = await fileMetaLink(match.id);
+    if (matchedVia === "org") {
+      return {
+        status: "found_org",
+        ...base,
+        fileName: match.name,
+        webViewLink,
+        note: "найдено в lena/org-docs",
+      };
+    }
     return { status: "found_founding", ...base, fileName: match.name, webViewLink };
   }
 
@@ -414,6 +482,26 @@ export async function verifyDocumentItem(
     files.filter((f) => f.mimeType !== FOLDER_MIME),
     doc.id,
   );
+  // #region agent log
+  if (doc.id === "power_of_attorney") {
+    checklistDebug714167(
+      "verifyDocumentAvailability.js:verifyDocumentItem:tender",
+      "tender attachment verify",
+      {
+        docId: doc.id,
+        tenderId,
+        slug,
+        folderId,
+        attachmentFiles: files
+          .filter((f) => f.mimeType !== FOLDER_MIME)
+          .map((f) => String(f.name ?? "")),
+        matched: Boolean(match),
+        matchName: match?.name ?? null,
+      },
+      "H4",
+    );
+  }
+  // #endregion
   if (!match) {
     return { status: "missing", ...base, note: "нет файла в attachments тендера" };
   }
@@ -454,10 +542,13 @@ export async function verifyDocumentsForChecklist(
     {
       tenderId,
       offerOrg,
+      companySubfolder: LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG[offerOrg],
       orgFileCount: orgFiles.length,
       foundingFileCount: foundingFiles.length,
+      orgFileNames: orgFiles.map((f) => String(f.name ?? "")),
+      foundingFileNames: foundingFiles.map((f) => String(f.name ?? "")),
     },
-    "H1",
+    "H1-H2",
   );
   // #endregion
 
@@ -509,8 +600,13 @@ export async function verifyDocumentsForChecklist(
       docCount: out.length,
       orgIndexSize: orgIndex.size,
       ms: Date.now() - tVerify,
+      verifySummary: out.map(({ doc, verify }) => ({
+        id: doc.id,
+        status: verify.status,
+        fileName: verify.fileName ?? null,
+      })),
     },
-    "H1",
+    "H1-H5",
   );
   // #endregion
   return out;

@@ -18,6 +18,12 @@ describe("verifyDocumentAvailability", () => {
     assert.equal(hit.id, "2");
   });
 
+  it("findMatchingDriveFile matches short certificate filename via normalize", () => {
+    const hit = findMatchingDriveFile([{ id: "9", name: "Свидетельство.pdf" }], "state_registration_certificate");
+    assert.ok(hit);
+    assert.equal(hit.id, "9");
+  });
+
   it("computeBankReferenceMaxDateIso returns first day of previous month", () => {
     assert.equal(computeBankReferenceMaxDateIso("15.03.2026"), "2026-02-01");
     assert.equal(computeBankReferenceMaxDateIso("2026-01-10"), "2025-12-01");
