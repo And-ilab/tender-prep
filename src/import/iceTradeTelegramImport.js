@@ -220,13 +220,13 @@ export function formatIceTradeImportShortSummary(r) {
   const deadline = snapshotDeadlineLine(snap) ?? "—";
   let docLine = "";
   if (r.inputsFolderWebViewLink) {
-    docLine = `Документация (файлы на Drive): ${r.inputsFolderWebViewLink}`;
+    docLine = `**Документация (файлы на Drive):** ${r.inputsFolderWebViewLink}`;
   } else if (o && Array.isArray(o.documentLinks) && o.documentLinks.length > 0) {
     const first = /** @type {{ href?: string; name?: string }} */ (o.documentLinks[0]);
-    if (first?.href) docLine = `Документация (ссылка с карточки): ${first.href}`;
+    if (first?.href) docLine = `**Документация (ссылка с карточки):** ${first.href}`;
   }
-  if (!docLine && r.iceTradeUrl) docLine = `Карточка закупки: ${r.iceTradeUrl}`;
-  if (!docLine) docLine = "Ссылка на комплект: —";
+  if (!docLine && r.iceTradeUrl) docLine = `**Карточка закупки:** ${r.iceTradeUrl}`;
+  if (!docLine) docLine = "**Ссылка на комплект:** —";
 
   const lines = [
     ICE_TRADE_TELEGRAM_IMPORT_STAGE_TITLE,

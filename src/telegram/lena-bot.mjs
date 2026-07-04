@@ -112,6 +112,7 @@ import {
   checklistMarkdownToTelegramHtml,
   validateTelegramHtml,
 } from "./checklistTelegramHtml.js";
+import { parseTelegramPendingTtlMs } from "./pendingTtl.js";
 import { buildRefinedChecklistTelegramBundle, formatUploadRecheckTelegram } from "../analysis/documentChecklist.js";
 import {
   classifyInputAttachmentSet,
@@ -201,7 +202,7 @@ const CB_PARSE_PREFIX = "lena_parse:";
 const CB_KP_ORG_SELECT = "lena_kpo:s:";
 const CB_KP_ORG_GO = "lena_kpo:g:";
 
-const KP_ORG_PENDING_TTL_MS = 60 * 60 * 1000;
+const TELEGRAM_PENDING_TTL_MS = parseTelegramPendingTtlMs();
 
 /**
  * @typedef {"price" | "payment" | "delivery" | "warranty"} ManagerPriceWizardStep
@@ -234,7 +235,7 @@ const kpOrgGoConsumed = new Set();
 function pruneKpOrgPendingMap() {
   const now = Date.now();
   for (const [k, v] of kpOrgPending) {
-    if (now - v.ts > KP_ORG_PENDING_TTL_MS) kpOrgPending.delete(k);
+    if (now - v.ts > TELEGRAM_PENDING_TTL_MS) kpOrgPending.delete(k);
   }
   if (kpOrgPending.size > 2000) kpOrgPending.clear();
   if (kpOrgGoConsumed.size > 8000) kpOrgGoConsumed.clear();
@@ -311,9 +312,6 @@ const CB_MGR_DOCS_DONE = "lena_docs:";
 const CB_MGR_DOCS_CONTINUE = "lena_docs_go:";
 const CB_IMPORT_DOCS_DONE = "lena_import_docs:";
 
-const PARSE_ORG_PENDING_TTL_MS = 60 * 60 * 1000;
-const IMPORT_DOCS_PENDING_TTL_MS = 60 * 60 * 1000;
-
 /** @param {ParseOrgPending} p */
 function tenderFlowPhase(p) {
   if (p.phase) return p.phase;
@@ -337,7 +335,7 @@ const parseOrgGoConsumed = new Set();
 function pruneParseOrgPendingMap() {
   const now = Date.now();
   for (const [k, v] of parseOrgPending) {
-    if (now - v.ts > PARSE_ORG_PENDING_TTL_MS) parseOrgPending.delete(k);
+    if (now - v.ts > TELEGRAM_PENDING_TTL_MS) parseOrgPending.delete(k);
   }
   if (parseOrgPending.size > 2000) parseOrgPending.clear();
   if (parseOrgGoConsumed.size > 8000) parseOrgGoConsumed.clear();
@@ -346,7 +344,7 @@ function pruneParseOrgPendingMap() {
 function pruneImportDocsPendingMap() {
   const now = Date.now();
   for (const [k, v] of importDocsPending) {
-    if (now - v.ts > IMPORT_DOCS_PENDING_TTL_MS) importDocsPending.delete(k);
+    if (now - v.ts > TELEGRAM_PENDING_TTL_MS) importDocsPending.delete(k);
   }
   if (importDocsPending.size > 2000) importDocsPending.clear();
 }
@@ -1035,7 +1033,7 @@ async function handleIceTradeBootstrap(chatId, replyTo, text) {
   try {
     assertCredentialsFile();
     const importOnly = telegramIceTradeImportOnlyEnabled();
-    progressMid = await sendText(chatId, replyTo, iceTradeImportProgressMessage(first, importOnly));
+    progressMid = await sendMarkdownHtmlChunks(chatId, replyTo, iceTradeImportProgressMessage(first, importOnly));
     const stopPulse = startChatActionPulse(chatId, chatActionForIceTradeImport());
     try {
       const { markdown, viewId, provisionGate, inputsFolderWebViewLink, importSnapshot } =
@@ -1053,8 +1051,8 @@ async function handleIceTradeBootstrap(chatId, replyTo, text) {
           importSnapshot,
           inputsFolderWebViewLink,
         });
-        await sendTextChunks(chatId, chainAnchor, markdown);
-        await sendTextChunks(
+        await sendMarkdownHtmlChunks(chatId, chainAnchor, markdown);
+        await sendMarkdownHtmlChunks(
           chatId,
           chainAnchor,
           provisionGate.message,
@@ -1071,7 +1069,7 @@ async function handleIceTradeBootstrap(chatId, replyTo, text) {
         if (!parseKeyboard) {
           console.error(`[lena-bot] callback_data > 64 B, кнопка парсинга не добавлена (${cbData.length})`);
         }
-        await sendTextChunks(chatId, chainAnchor, markdown, parseKeyboard);
+        await sendMarkdownHtmlChunks(chatId, chainAnchor, markdown, parseKeyboard);
       }
     } finally {
       stopPulse();
@@ -1180,6 +1178,24 @@ function stripAssistantMarkdownForTelegram(text) {
   }
   s = s.replace(/(^|[\s>"'(,:])_([^_\n]+)_([\s)<"',.:!?]|$)/g, "$1$2$3");
   return s;
+}
+
+/**
+ * Markdown (**bold**, [link](url)) → Telegram HTML и отправка с parse_mode: HTML.
+ * @param {number} chatId
+ * @param {number} [replyTo]
+ * @param {string} markdown
+ * @param {Record<string, unknown>} [replyMarkupLast]
+ * @returns {Promise<number | undefined>}
+ */
+async function sendMarkdownHtmlChunks(chatId, replyTo, markdown, replyMarkupLast) {
+  const html = checklistMarkdownToTelegramHtml(markdown);
+  const v = validateTelegramHtml(html);
+  if (!v.ok) {
+    console.error("[lena-bot] markdown→HTML validation failed", v);
+    return sendTextChunks(chatId, replyTo, markdown, replyMarkupLast);
+  }
+  return sendTextChunks(chatId, replyTo, html, replyMarkupLast, { parseMode: "HTML" });
 }
 
 /**
@@ -1862,7 +1878,7 @@ async function handleCallbackQuery(cq) {
       await answerCallbackQuery(id, "Запрос устарел. Повторите /tenderkp", true);
       return;
     }
-    if (Date.now() - pending.ts > KP_ORG_PENDING_TTL_MS) {
+    if (Date.now() - pending.ts > TELEGRAM_PENDING_TTL_MS) {
       kpOrgPending.delete(token);
       await answerCallbackQuery(id, "Запрос устарел. Повторите /tenderkp", true);
       return;
@@ -1906,7 +1922,7 @@ async function handleCallbackQuery(cq) {
       await answerCallbackQuery(id, "Запрос устарел. Повторите /tenderkp", true);
       return;
     }
-    if (Date.now() - pending.ts > KP_ORG_PENDING_TTL_MS) {
+    if (Date.now() - pending.ts > TELEGRAM_PENDING_TTL_MS) {
       kpOrgPending.delete(token);
       await answerCallbackQuery(id, "Запрос устарел. Повторите /tenderkp", true);
       return;
@@ -2183,7 +2199,7 @@ async function handleCallbackQuery(cq) {
       await answerCallbackQuery(id, "Сообщение устарело.", true);
       return;
     }
-    if (Date.now() - pending.ts > PARSE_ORG_PENDING_TTL_MS) {
+    if (Date.now() - pending.ts > TELEGRAM_PENDING_TTL_MS) {
       parseOrgPending.delete(token);
       await answerCallbackQuery(id, "Сообщение устарело.", true);
       return;
@@ -2258,7 +2274,7 @@ async function handleCallbackQuery(cq) {
       await answerCallbackQuery(id, "Сообщение устарело. Запустите парсинг снова или /tenderkp.", true);
       return;
     }
-    if (Date.now() - pending.ts > PARSE_ORG_PENDING_TTL_MS) {
+    if (Date.now() - pending.ts > TELEGRAM_PENDING_TTL_MS) {
       parseOrgPending.delete(token);
       await answerCallbackQuery(id, "Сообщение устарело. Запустите парсинг снова или /tenderkp.", true);
       return;
