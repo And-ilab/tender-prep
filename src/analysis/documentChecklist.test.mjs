@@ -9,6 +9,8 @@ import {
   formatDocumentCompositionStep1Telegram,
   formatQualificationRequirementsTelegram,
   formatQualificationRequirementTelegramBlock,
+  formatUploadRecheckTelegram,
+  UPLOAD_RECHECK_DISCLAIMER,
   parseQualificationConfirmation,
   dedupeQualificationRequirements,
   splitMergedQualificationRequirements,
@@ -693,6 +695,68 @@ describe("pre-org checklist filtering", () => {
     assert.match(text, /Справка из банка/);
     assert.match(text, /не ранее 1-го числа/i);
     assert.match(text, /после выбора.*участника/i);
+  });
+});
+
+describe("formatUploadRecheckTelegram", () => {
+  const structured = {
+    tenderTitle: null,
+    sumOrBudget: null,
+    submissionOverview: null,
+    submissionMethod: null,
+    submissionDeadline: null,
+    qualificationRequirements: [],
+    lenaCanPrepare: [],
+    managerMustProvide: [],
+  };
+
+  it("lists missing uploads with links and disclaimer", () => {
+    const reg = normalizeToCanonicalDocument("Свидетельство о государственной регистрации");
+    const url = "https://drive.google.com/drive/folders/abc";
+    const text = formatUploadRecheckTelegram(
+      [
+        {
+          doc: reg,
+          verify: {
+            status: "missing",
+            canonicalId: reg.id,
+            title: reg.title,
+            note: "нет файла в lena/founding-docs",
+          },
+        },
+      ],
+      [{ docId: reg.id, webViewLink: url }],
+      structured,
+    );
+    assert.match(text, /Проверка загрузки/);
+    assert.match(text, /Ещё не загружено/);
+    assert.match(text, /\[загрузить\]\(https:\/\/drive\.google\.com/);
+    assert.match(text, /founding-docs/);
+    assert.match(text, /не будут включены/);
+    assert.equal(text.includes(UPLOAD_RECHECK_DISCLAIMER), true);
+  });
+
+  it("shows ok line when all manager uploads found", () => {
+    const reg = normalizeToCanonicalDocument("Свидетельство о государственной регистрации");
+    const text = formatUploadRecheckTelegram(
+      [
+        {
+          doc: reg,
+          verify: {
+            status: "found_founding",
+            canonicalId: reg.id,
+            title: reg.title,
+            fileName: "Устав.pdf",
+            webViewLink: "https://drive.google.com/file/d/x/view",
+          },
+        },
+      ],
+      [],
+      structured,
+    );
+    assert.match(text, /Все обязательные для догрузки файлы найдены/);
+    assert.match(text, /Устав\.pdf/);
+    assert.match(text, /не будут включены/);
   });
 });
 

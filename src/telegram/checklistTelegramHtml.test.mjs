@@ -29,4 +29,12 @@ describe("checklistMarkdownToTelegramHtml", () => {
     assert.equal(v.ok, false);
     assert.equal(v.tag, "</i>");
   });
+
+  it("recheck upload links with underscores in file names stay valid HTML", () => {
+    const md =
+      "**Проверка загрузки**\n\n- Свидетельство — [загрузить](https://drive.google.com/file/d/x/view) — (нет файла)";
+    const html = checklistMarkdownToTelegramHtml(md);
+    const v = validateTelegramHtml(html);
+    assert.equal(v.ok, true, JSON.stringify(v));
+  });
 });

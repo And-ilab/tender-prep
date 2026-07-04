@@ -112,7 +112,7 @@ import {
   checklistMarkdownToTelegramHtml,
   validateTelegramHtml,
 } from "./checklistTelegramHtml.js";
-import { buildRefinedChecklistTelegramBundle } from "../analysis/documentChecklist.js";
+import { buildRefinedChecklistTelegramBundle, formatUploadRecheckTelegram } from "../analysis/documentChecklist.js";
 import {
   classifyInputAttachmentSet,
   resolvePostExtractProvisionGate,
@@ -308,6 +308,7 @@ const importDocsPending = new Map();
 const CB_PARSE_ORG_SELECT = "lena_porg:s:";
 const CB_PARSE_ORG_GO = "lena_porg:g:";
 const CB_MGR_DOCS_DONE = "lena_docs:";
+const CB_MGR_DOCS_CONTINUE = "lena_docs_go:";
 const CB_IMPORT_DOCS_DONE = "lena_import_docs:";
 
 const PARSE_ORG_PENDING_TTL_MS = 60 * 60 * 1000;
@@ -656,6 +657,20 @@ function buildOrgSelectKeyboard(token) {
 function buildDocsDoneKeyboard(token) {
   return {
     inline_keyboard: [[{ text: "Документы загружены", callback_data: `${CB_MGR_DOCS_DONE}${token}` }]],
+  };
+}
+
+/**
+ * @param {string} token
+ */
+function buildUploadRecheckKeyboard(token) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "Проверить снова", callback_data: `${CB_MGR_DOCS_DONE}${token}` },
+        { text: "Продолжить", callback_data: `${CB_MGR_DOCS_CONTINUE}${token}` },
+      ],
+    ],
   };
 }
 
@@ -1425,7 +1440,6 @@ async function sendRefinedChecklistAfterOrgSelect(chatId, chainReplyTo, pending,
     pending.phase = "awaiting_manager_docs";
     pending.ts = Date.now();
 
-    const gateOn = !managerPriceGateDisabled();
     const checklistOpts = { parseMode: /** @type {const} */ ("HTML") };
     const checklistHtml = checklistMarkdownToTelegramHtml(bundle.text);
     const htmlValidation = validateTelegramHtml(checklistHtml);
@@ -1445,20 +1459,6 @@ async function sendRefinedChecklistAfterOrgSelect(chatId, chainReplyTo, pending,
     );
     // #endregion
     try {
-      if (!gateOn && bundle.uploadTargets.length === 0) {
-        await sendTextChunks(chatId, chainReplyTo, checklistHtml, buildDocsDoneKeyboard(token), checklistOpts);
-        await handleManagerDocsDone(chatId, chainReplyTo, token, pending);
-        // #region agent log
-        checklistDebug714167(
-          "lena-bot.mjs:sendRefinedChecklistAfterOrgSelect",
-          "step2 sent (auto docs done)",
-          { tenderId: pending.tenderId },
-          "H3",
-        );
-        // #endregion
-        return;
-      }
-
       await sendTextChunks(chatId, chainReplyTo, checklistHtml, buildDocsDoneKeyboard(token), checklistOpts);
       // #region agent log
       checklistDebug714167(
@@ -1480,6 +1480,71 @@ async function sendRefinedChecklistAfterOrgSelect(chatId, chainReplyTo, pending,
       // #endregion
       await sendText(chatId, chainReplyTo, `Не удалось отправить чеклист: ${err.slice(0, 3500)}`);
     }
+  } finally {
+    stopPulse();
+  }
+}
+
+/**
+ * @param {number} chatId
+ * @param {number} msgId
+ */
+async function clearInlineReplyMarkup(chatId, msgId) {
+  try {
+    /** @type {Record<string, unknown>} */
+    const rmBody = {
+      chat_id: chatId,
+      message_id: msgId,
+      reply_markup: { inline_keyboard: [] },
+    };
+    if (typeof outboundMessageThreadId === "number") rmBody.message_thread_id = outboundMessageThreadId;
+    await tgJson("editMessageReplyMarkup", rmBody);
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Повторная проверка Drive после «Документы загружены» / «Проверить снова».
+ * @param {number} chatId
+ * @param {number} msgId
+ * @param {string} token
+ * @param {ParseOrgPending} pending
+ */
+async function runManagerDocsRecheck(chatId, msgId, token, pending) {
+  assertCredentialsFile();
+  if (!pending.selected || !pending.analysisStructured || !pending.requiredDocuments) {
+    await sendText(chatId, msgId, "Нет данных анализа — запустите «Анализ документов» снова.");
+    return;
+  }
+  const orgLabel = OFFER_ORG[pending.selected].label;
+  const stopPulse = startChatActionPulse(chatId);
+  try {
+    const bundle = await buildRefinedChecklistTelegramBundle(
+      rootId,
+      pending.tenderId,
+      pending.selected,
+      orgLabel,
+      pending.analysisStructured,
+      pending.requiredDocuments,
+      pending.opts,
+      { corpus: pending.analysisHintsCorpus ?? "" },
+    );
+    pending.uploadLinks = bundle.uploadTargets;
+    pending.phase = "awaiting_manager_docs";
+    pending.ts = Date.now();
+
+    const recheckText = formatUploadRecheckTelegram(
+      bundle.verifyResults,
+      bundle.uploadTargets,
+      pending.analysisStructured,
+    );
+    const recheckHtml = checklistMarkdownToTelegramHtml(recheckText);
+    const checklistOpts = { parseMode: /** @type {const} */ ("HTML") };
+    await sendTextChunks(chatId, msgId, recheckHtml, buildUploadRecheckKeyboard(token), checklistOpts);
+  } catch (e) {
+    const err = e instanceof Error ? e.message : String(e);
+    await sendText(chatId, msgId, `Проверка загрузки: ошибка — ${err.slice(0, 3500)}`);
   } finally {
     stopPulse();
   }
@@ -2075,19 +2140,30 @@ async function handleCallbackQuery(cq) {
       await answerCallbackQuery(id, "Сначала выберите компанию.", true);
       return;
     }
-    await answerCallbackQuery(id, "Переходим к условиям…");
-    try {
-      /** @type {Record<string, unknown>} */
-      const rmBody = {
-        chat_id: chatId,
-        message_id: msgId,
-        reply_markup: { inline_keyboard: [] },
-      };
-      if (typeof outboundMessageThreadId === "number") rmBody.message_thread_id = outboundMessageThreadId;
-      await tgJson("editMessageReplyMarkup", rmBody);
-    } catch {
-      /* ignore */
+    await answerCallbackQuery(id, "Проверяю Drive…");
+    await clearInlineReplyMarkup(chatId, msgId);
+    await runManagerDocsRecheck(chatId, msgId, token, pending);
+    return;
+  }
+
+  if (data.startsWith(CB_MGR_DOCS_CONTINUE)) {
+    const token = data.slice(CB_MGR_DOCS_CONTINUE.length).trim();
+    pruneParseOrgPendingMap();
+    const pending = parseOrgPending.get(token);
+    if (!pending || pending.chatId !== chatId) {
+      await answerCallbackQuery(id, "Сообщение устарело.", true);
+      return;
     }
+    if (tenderFlowPhase(pending) !== "awaiting_manager_docs") {
+      await answerCallbackQuery(id, "Уже обработано или устарело.", true);
+      return;
+    }
+    if (!pending.selected) {
+      await answerCallbackQuery(id, "Сначала выберите компанию.", true);
+      return;
+    }
+    await answerCallbackQuery(id, "Продолжаем…");
+    await clearInlineReplyMarkup(chatId, msgId);
     await handleManagerDocsDone(chatId, msgId, token, pending);
     return;
   }

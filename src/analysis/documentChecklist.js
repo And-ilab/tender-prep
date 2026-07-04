@@ -1043,6 +1043,98 @@ export function formatDocumentCompositionStep1Telegram(
   return lines.join("\n").trimEnd();
 }
 
+/** Текст предупреждения после повторной проверки догрузки (Telegram step recheck). */
+export const UPLOAD_RECHECK_DISCLAIMER =
+  "Вы можете загрузить не все документы — тогда они **не будут включены** в пакет документов для подачи.";
+
+/**
+ * @param {{ doc: NormalizedDoc, verify: import("./verifyDocumentAvailability.js").DocumentVerifyResult }[]} verifyResults
+ * @param {AnalysisStructured} structured
+ */
+export function partitionVerifyResultsForChecklist(verifyResults, structured) {
+  /** @type {typeof verifyResults} */
+  const alreadyHave = [];
+  /** @type {typeof verifyResults} */
+  const lenaPrepare = [];
+  /** @type {typeof verifyResults} */
+  const needUpload = [];
+
+  for (const row of verifyResults) {
+    const { doc, verify } = row;
+    if (isVerifyStatusAlreadyHave(verify.status)) {
+      alreadyHave.push(row);
+    } else if (shouldShowInLenaPrepareBlock(doc, verify, structured)) {
+      lenaPrepare.push(row);
+    } else if (isVerifyStatusNeedsUpload(verify.status)) {
+      needUpload.push(row);
+    } else {
+      needUpload.push(row);
+    }
+  }
+
+  return { alreadyHave, lenaPrepare, needUpload };
+}
+
+/**
+ * @param {ReturnType<typeof partitionVerifyResultsForChecklist>["needUpload"]} needUpload
+ * @param {Map<string, string | undefined>} linkById
+ */
+function formatNeedUploadTelegramLines(needUpload, linkById) {
+  const lines = [];
+  for (const { doc, verify } of needUpload) {
+    const link = linkById.get(doc.id);
+    const titleLine = uploadTargetDisplayTitle(doc.id, doc.title);
+    if (link) {
+      lines.push(`- ${titleLine} — [загрузить](${link})${formatVerifyTelegramSuffix(verify)}`);
+    } else {
+      lines.push(`- ${titleLine}${formatVerifyTelegramSuffix(verify)}`);
+    }
+  }
+  return lines;
+}
+
+/**
+ * Сообщение после «Документы загружены»: повторная проверка Drive + ссылки + предупреждение.
+ * @param {{ doc: NormalizedDoc, verify: import("./verifyDocumentAvailability.js").DocumentVerifyResult }[]} verifyResults
+ * @param {import("./ensureDocumentUploadTargets.js").DocumentUploadTarget[]} uploadTargets
+ * @param {AnalysisStructured} structured
+ */
+export function formatUploadRecheckTelegram(verifyResults, uploadTargets, structured) {
+  const linkById = new Map(uploadTargets.map((t) => [t.docId, t.webViewLink]));
+  const { alreadyHave, lenaPrepare, needUpload } = partitionVerifyResultsForChecklist(
+    verifyResults,
+    structured,
+  );
+
+  const lines = ["**Проверка загрузки**", ""];
+
+  lines.push("**Найдено на Drive:**");
+  if (!alreadyHave.length) {
+    lines.push("- (пока ничего не найдено на Drive)");
+  } else {
+    for (const { doc, verify } of alreadyHave) {
+      lines.push(`- ${submissionDisplayTitle(doc)}${formatVerifyTelegramSuffix(verify)}`);
+    }
+  }
+
+  lines.push("", "**Ещё не загружено:**");
+  if (!needUpload.length) {
+    lines.push("- Все обязательные для догрузки файлы найдены");
+  } else {
+    lines.push(...formatNeedUploadTelegramLines(needUpload, linkById));
+  }
+
+  if (lenaPrepare.length) {
+    lines.push("", "**Подготовлю сама** (догрузка не требуется):");
+    for (const { doc } of lenaPrepare) {
+      lines.push(`- ${submissionDisplayTitle(doc)}`);
+    }
+  }
+
+  lines.push("", UPLOAD_RECHECK_DISCLAIMER);
+  return lines.join("\n");
+}
+
 /**
  * @param {AnalysisStructured} structured
  * @param {"gs_retail" | "finselvat"} offerOrg
@@ -1069,25 +1161,10 @@ export function formatRefinedChecklistStep2Telegram(
     lines.push(qualBlock, "");
   }
 
-  /** @type {typeof verifyResults} */
-  const alreadyHave = [];
-  /** @type {typeof verifyResults} */
-  const lenaPrepare = [];
-  /** @type {typeof verifyResults} */
-  const needUpload = [];
-
-  for (const row of verifyResults) {
-    const { doc, verify } = row;
-    if (isVerifyStatusAlreadyHave(verify.status)) {
-      alreadyHave.push(row);
-    } else if (shouldShowInLenaPrepareBlock(doc, verify, structured)) {
-      lenaPrepare.push(row);
-    } else if (isVerifyStatusNeedsUpload(verify.status)) {
-      needUpload.push(row);
-    } else {
-      needUpload.push(row);
-    }
-  }
+  const { alreadyHave, lenaPrepare, needUpload } = partitionVerifyResultsForChecklist(
+    verifyResults,
+    structured,
+  );
 
   lines.push("**Уже есть:**");
   if (!alreadyHave.length) {
@@ -1120,15 +1197,7 @@ export function formatRefinedChecklistStep2Telegram(
   if (!needUpload.length) {
     lines.push("- (нет — переходите к условиям.)");
   } else {
-    for (const { doc, verify } of needUpload) {
-      const link = linkById.get(doc.id);
-      const titleLine = uploadTargetDisplayTitle(doc.id, doc.title);
-      if (link) {
-        lines.push(`- ${titleLine} — [загрузить](${link})${formatVerifyTelegramSuffix(verify)}`);
-      } else {
-        lines.push(`- ${titleLine}${formatVerifyTelegramSuffix(verify)}`);
-      }
-    }
+    lines.push(...formatNeedUploadTelegramLines(needUpload, linkById));
   }
 
   return lines.join("\n");
