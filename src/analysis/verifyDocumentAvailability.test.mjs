@@ -27,6 +27,15 @@ describe("verifyDocumentAvailability", () => {
     assert.equal(hit.id, "9");
   });
 
+  it("findMatchingDriveFile matches abbreviated гос регистрации certificate filename", () => {
+    const hit = findMatchingDriveFile(
+      [{ id: "10", name: "Свидетельство о гос регистрации (2).pdf" }],
+      "state_registration_certificate",
+    );
+    assert.ok(hit);
+    assert.equal(hit.id, "10");
+  });
+
   it("computeBankReferenceMaxDateIso returns first day of previous month", () => {
     assert.equal(computeBankReferenceMaxDateIso("15.03.2026"), "2026-02-01");
     assert.equal(computeBankReferenceMaxDateIso("2026-01-10"), "2025-12-01");

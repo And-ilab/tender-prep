@@ -120,6 +120,21 @@ export function findMatchingDriveFile(files, canonicalId) {
       if (normalized.id === canonicalId && normalized.id !== "other") {
         return { id, name };
       }
+      if (
+        canonicalId === "state_registration_certificate" &&
+        /свидетельств/i.test(stem) &&
+        /(?:гос(?:ударственн)?|гос\.)\s*регистрац/i.test(stem)
+      ) {
+        // #region agent log
+        checklistDebug714167(
+          "verifyDocumentAvailability.js:findMatchingDriveFile",
+          "certificate matched via гос регистрации pattern",
+          { fileName: name, stem, normalizedId: normalized.id },
+          "H2",
+        );
+        // #endregion
+        return { id, name };
+      }
     }
   }
   return null;

@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { uploadFile } from "../drive/ops.js";
 
-const ENDPOINT = "http://127.0.0.1:7273/ingest/0fbf9c34-aa58-4c41-8b66-36b66355e6e0";
+const ENDPOINT = "http://127.0.0.1:7556/ingest/0fbf9c34-aa58-4c41-8b66-36b66355e6e0";
 const SESSION = "714167";
 const LOG_REL = join("logs", "checklist-debug-714167.ndjson");
 
