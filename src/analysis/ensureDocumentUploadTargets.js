@@ -1,5 +1,6 @@
 import { ensureChildFolder } from "../drive/folders.js";
 import { driveFolderWebLink } from "../drive/ops.js";
+import { ORG_REFERENCES_SUBFOLDER } from "../drive/layoutConstants.js";
 import { ensureLenaTree, ensureTenderTree } from "../drive/workspace.js";
 import { lenaCompanyFolderName } from "../drive/layoutConstants.js";
 import { getCanonicalTypeById } from "./canonicalDocumentTypes.js";
@@ -46,9 +47,14 @@ export async function ensureDocumentUploadTargets(
       folderId = co.id;
     } else if (doc.storage === "org" && layout.orgDocsId) {
       const co = await ensureChildFolder(layout.orgDocsId, companyFolder);
-      folderId = co.id;
+      if (doc.id === "reference_list") {
+        const ref = await ensureChildFolder(co.id, ORG_REFERENCES_SUBFOLDER);
+        folderId = ref.id;
+      } else {
+        folderId = co.id;
+      }
     } else if (doc.storage === "tender" && tender.attachmentsId) {
-      const slug = doc.id.replace(/[^a-z0-9_-]+/gi, "-").slice(0, 48) || "other";
+      const slug = attachmentSlugForDocId(doc.id);
       const sub = await ensureChildFolder(tender.attachmentsId, slug);
       folderId = sub.id;
     }

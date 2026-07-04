@@ -2,8 +2,13 @@ import { findChildFolderId } from "../drive/folders.js";
 import { getMetadata, listChildren } from "../drive/ops.js";
 import { LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG } from "../drive/layoutConstants.js";
 import { ensureLenaTree, ensureTenderTree } from "../drive/workspace.js";
-import { normalizeToCanonicalDocument } from "./canonicalDocumentTypes.js";
+import { normalizeToCanonicalDocument, isSharedReusableDocument } from "./canonicalDocumentTypes.js";
 import { attachmentSlugForDocId } from "./ensureDocumentUploadTargets.js";
+import {
+  companyIndexToIdentifiedMap,
+  loadCompanyDocsIndex,
+  pickBestFileForCanonicalId,
+} from "./companyDocsIndex.js";
 import {
   computeLastReportingQuarterHint,
   extractAndIdentifyDriveFile,
@@ -11,6 +16,7 @@ import {
   isReportingPeriodValid,
 } from "./identifyUploadedDocuments.js";
 import { fileMatchesCanonicalType, resolveDocumentFormSource } from "./resolveDocumentFormSource.js";
+import { verifyStatusIsValidForPackage } from "./validateOrgDocumentRules.js";
 import { checklistDebug714167 } from "../debug/checklistDebug714167.js";
 
 const FOLDER_MIME = "application/vnd.google-apps.folder";
@@ -87,35 +93,13 @@ export function shouldShowInLenaPrepareBlock(doc, verify, structured) {
 /**
  * @param {string} parentFolderId
  * @param {"gs_retail" | "finselvat"} offerOrg
+ * @returns {Promise<{ id?: string, name?: string, mimeType?: string }[]>}
  */
-async function listCompanySubfolderFiles(parentFolderId, offerOrg) {
+export async function listCompanySubfolderFiles(parentFolderId, offerOrg) {
   const subName = LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG[offerOrg];
   const companyFolderId = await findChildFolderId(parentFolderId, subName);
-  const subfolderNames = new Set(Object.values(LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG));
-  /** @type {Map<string, { id?: string, name?: string, mimeType?: string }>} */
-  const byId = new Map();
-
-  const addFiles = (items) => {
-    for (const f of items) {
-      if (f.mimeType === FOLDER_MIME) continue;
-      const id = String(f.id ?? "");
-      if (!id) continue;
-      byId.set(id, f);
-    }
-  };
-
-  if (companyFolderId) {
-    addFiles(await listChildren(companyFolderId));
-  }
-
-  const rootItems = await listChildren(parentFolderId);
-  addFiles(
-    rootItems.filter(
-      (f) => f.mimeType !== FOLDER_MIME && !subfolderNames.has(String(f.name ?? "")),
-    ),
-  );
-
-  return [...byId.values()];
+  if (!companyFolderId) return [];
+  return (await listChildren(companyFolderId)).filter((f) => f.mimeType !== FOLDER_MIME);
 }
 
 /**
@@ -156,6 +140,19 @@ export function extractFirstDateIso(text) {
   const ymd = s.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
   if (ymd) return `${ymd[1]}-${ymd[2]}-${ymd[3]}`;
   return null;
+}
+
+/**
+ * @param {string | null | undefined} text
+ * @returns {string | null}
+ */
+export function extractPoaExpiryDateIso(text) {
+  const s = String(text ?? "");
+  const m =
+    s.match(/действ\w*\s+до\s+(\d{1,2}[./]\d{1,2}[./]\d{4})/i) ??
+    s.match(/действ\w*\s+до\s+(\d{4}-\d{2}-\d{2})/i) ??
+    s.match(/срок\s+действ\w*\s+.*?(\d{1,2}[./]\d{1,2}[./]\d{4})/i);
+  return m ? extractFirstDateIso(m[1]) : null;
 }
 
 /**
@@ -331,8 +328,13 @@ async function verifyPeriodicOrgDocument(doc, match, identified, ctx) {
  */
 async function verifyOrgDocument(doc, orgFiles, orgIndex, ctx) {
   const base = { canonicalId: doc.id, title: doc.title };
-  const match =
-    findFileForCanonicalId(orgFiles, orgIndex, doc.id) ?? findMatchingDriveFile(orgFiles, doc.id);
+  const registryHit = ctx.companyIndex
+    ? pickBestFileForCanonicalId(ctx.companyIndex.files, doc.id, { preferValid: true })
+    : null;
+  let match =
+    (registryHit ? { id: registryHit.fileId, name: registryHit.fileName } : null) ??
+    findFileForCanonicalId(orgFiles, orgIndex, doc.id) ??
+    findMatchingDriveFile(orgFiles, doc.id);
   if (!match) {
     return { status: "missing", ...base, note: "нет файла в lena/org-docs" };
   }
@@ -421,7 +423,11 @@ export async function verifyDocumentItem(
   }
 
   if (doc.storage === "founding") {
+    const registryHit = ctx.companyIndex
+      ? pickBestFileForCanonicalId(ctx.companyIndex.files, doc.id, { preferValid: true })
+      : null;
     let match =
+      (registryHit ? { id: registryHit.fileId, name: registryHit.fileName } : null) ??
       findFileForCanonicalId(ctx.foundingFiles, ctx.foundingIndex, doc.id) ??
       findMatchingDriveFile(ctx.foundingFiles, doc.id);
     let matchedVia = match ? "founding" : null;
@@ -535,6 +541,13 @@ export async function verifyDocumentsForChecklist(
     ? await listCompanySubfolderFiles(layout.foundingDocsId, offerOrg)
     : [];
 
+  const { index: companyIndex } = await loadCompanyDocsIndex(userRootId, offerOrg);
+  const registryOrgIndex = companyIndexToIdentifiedMap(companyIndex);
+  const registryFoundingIndex = companyIndexToIdentifiedMap({
+    ...companyIndex,
+    files: companyIndex.files.filter((f) => f.masterPath === "founding-docs"),
+  });
+
   // #region agent log
   checklistDebug714167(
     "verifyDocumentAvailability.js:verifyDocumentsForChecklist",
@@ -560,15 +573,16 @@ export async function verifyDocumentsForChecklist(
   }
 
   /** @type {Map<string, import("./identifyUploadedDocuments.js").IdentifiedDocument>} */
-  const orgIndex = new Map();
+  const orgIndex = new Map(registryOrgIndex);
   /** @type {Map<string, import("./identifyUploadedDocuments.js").IdentifiedDocument>} */
-  const foundingIndex = new Map();
+  const foundingIndex = new Map(registryFoundingIndex);
 
   const ctx = {
     orgFiles,
     foundingFiles,
     orgIndex,
     foundingIndex,
+    companyIndex,
     inputFiles,
     tender,
     corpus: opts.corpus ?? "",
@@ -615,13 +629,16 @@ export async function verifyDocumentsForChecklist(
 /**
  * @param {VerifyStatus} status
  */
-export function isVerifyStatusAlreadyHave(status) {
-  return (
-    status === "found_org" ||
-    status === "found_org_valid" ||
-    status === "found_founding" ||
-    status === "found_tender"
-  );
+export function isVerifyStatusAlreadyHave(status, canonicalId) {
+  return verifyStatusIsValidForPackage(status, canonicalId);
+}
+
+/**
+ * @param {VerifyStatus} status
+ * @param {string} [canonicalId]
+ */
+export function isVerifyStatusValidForRecheck(status, canonicalId) {
+  return verifyStatusIsValidForPackage(status, canonicalId);
 }
 
 /**

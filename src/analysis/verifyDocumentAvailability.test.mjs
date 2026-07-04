@@ -1,9 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG } from "../drive/layoutConstants.js";
 import {
   computeBankReferenceMaxDateIso,
+  extractPoaExpiryDateIso,
   findMatchingDriveFile,
   isBankReferenceDateValid,
+  listCompanySubfolderFiles,
 } from "./verifyDocumentAvailability.js";
 
 describe("verifyDocumentAvailability", () => {
@@ -33,5 +36,22 @@ describe("verifyDocumentAvailability", () => {
     assert.equal(isBankReferenceDateValid("2026-01-15", "2026-02-01"), true);
     assert.equal(isBankReferenceDateValid("2026-03-01", "2026-02-01"), false);
     assert.equal(isBankReferenceDateValid(null, "2026-02-01"), null);
+  });
+
+  it("company subfolders are distinct for gs-retail vs finselvat", () => {
+    assert.notEqual(
+      LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG.gs_retail,
+      LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG.finselvat,
+    );
+    assert.equal(LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG.gs_retail, "gs-retail");
+    assert.equal(LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG.finselvat, "finselvat");
+  });
+
+  it("extractPoaExpiryDateIso parses действует до", () => {
+    assert.equal(extractPoaExpiryDateIso("действует до 31.12.2026"), "2026-12-31");
+  });
+
+  it("listCompanySubfolderFiles is exported for strict company isolation", () => {
+    assert.equal(typeof listCompanySubfolderFiles, "function");
   });
 });

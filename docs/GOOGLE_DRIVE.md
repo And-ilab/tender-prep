@@ -25,8 +25,8 @@
           inputs/                    ← комплект документов закупки с площадки / из извещения (в продукте: «документы заказчика»); сюда же кладём скачанные файлы до парсинга; при **bootstrap IceTrade** — `icetrade-import-snapshot.json` (поля карточки и события)
           drafts/
           exports/
-          attachments/               ← доказательства, приложения к матрице
-          notes/                     ← разъяснения, переписка, короткие заметки; лог с менеджерами в Telegram — `telegram-managers-log.md` (см. LENA_RULES §6e)
+          attachments/               ← доказательства, приложения к матрице; **submission/** — комплект для печати (ярлыки + файлы); **_incoming/** — staging загрузки
+          notes/                     ← разъяснения, переписка, короткие заметки; **submission-package.json** — манифест комплекта; лог с менеджерами в Telegram — `telegram-managers-log.md` (см. LENA_RULES §6e)
       <tender_id>/                   ← только если явно указали режим flat (без года)
         inputs/                     ← то же: комплект закупки («документы заказчика»); при bootstrap IceTrade — `icetrade-import-snapshot.json`
         …
@@ -44,9 +44,11 @@
 
 **Контекст:** `_lena/context` — `context-list`, `context-pull`, поле `contextFiles` в `agent-bundle`. Дополнительно можно задать **`LENA_EXTRA_CONTEXT_FOLDERS`**: через запятую/перенос строки — URL или id **других папок** на том же Диске (расшаренных на тот же сервисный аккаунт); файлы из корня каждой папки **подмешиваются** в тот же список и в бандл (с полями `lenaContextSource`, `lenaContextExtraRootId`). Вложенные подпапки внутри доп. корней не обходятся.
 
-**Документы организации (операционные):** `_lena/org-docs` — справка банка со сроком, бухгалтерская отчётность и аналоги. Для **нескольких юрлиц** материалы кладите в **`_lena/org-docs/gs-retail/`** или **`_lena/org-docs/finselvat/`**, не смешивая компании. Корень `org-docs` можно использовать только для общих, не привязанных к юрлицу файлов. Создаётся при `workspace-ensure`; список: `drive org-docs-list <root>` (в выборке — и подпапки, и файлы в корне); в `agent-bundle` — **`lena.orgDocsFolderId`** и **`orgDocsFiles`**. Сценарий Лены — в [LENA_RULES.md](LENA_RULES.md) §6b.
+**Документы организации (операционные):** `_lena/org-docs` — справка банка со сроком, бухгалтерская отчётность, доверенность и аналоги. Для **нескольких юрлиц** материалы кладите **только** в **`_lena/org-docs/gs-retail/`** или **`_lena/org-docs/finselvat/`** — компании **не смешиваются**. В каждой подпапке: **`company-docs-index.json`** (машинный реестр после OCR/recheck), **`references/`** (пул отзывов). Verify и ingest читают **только** подпапку выбранного участника. Создаётся при `workspace-ensure`; список: `drive org-docs-list <root>`; в `agent-bundle` — **`lena.orgDocsFolderId`** и **`orgDocsFiles`**. Сценарий Лены — в [LENA_RULES.md](LENA_RULES.md) §6b.
 
-**Учредительные документы:** `_lena/founding-docs` — устав, регистрация, приказ о директоре и т.п. Структура как у `org-docs`: подпапки **`gs-retail`**, **`finselvat`**. Те же правила загрузки и реестра. Создаётся при `workspace-ensure`; список: `drive founding-docs-list <root>`; в `agent-bundle` — **`lena.foundingDocsFolderId`** и **`foundingDocsFiles`**. Подробнее — [LENA_RULES.md](LENA_RULES.md) §6c.
+**Учредительные документы:** `_lena/founding-docs` — устав, регистрация, приказ о директоре и т.п. Структура как у `org-docs`: подпапки **`gs-retail`**, **`finselvat`** (строгая изоляция). Записи учредительных файлов также попадают в **`company-docs-index.json`** соответствующей компании. Создаётся при `workspace-ensure`; список: `drive founding-docs-list <root>`; в `agent-bundle` — **`lena.foundingDocsFolderId`** и **`foundingDocsFiles`**. Подробнее — [LENA_RULES.md](LENA_RULES.md) §6c.
+
+**Комплект тендера для печати:** `_lena/tenders/…/<id>/attachments/submission/` — **одна ссылка** исполнителю: ярлыки на master-файлы из `org-docs` / `founding-docs` выбранного юрлица + физические tender-only файлы (КП, заявления). Манифест — `notes/submission-package.json`.
 
 **Тендер:** `workspace-tender` (год по умолчанию или `ГГГГ`, либо `flat`); внутри — `inputs`, `drafts`, `exports`, `attachments`, **`notes`** (в т.ч. **`telegram-managers-log.md`** — контекстный лог переписки с менеджерами по этому тендеру, см. [LENA_RULES.md](LENA_RULES.md) §6e). Копия шаблона: `template-copy` (см. `drive` — `flat`, год или только новое имя).
 

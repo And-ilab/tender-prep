@@ -17,6 +17,8 @@ import {
   shouldShowInLenaPrepareBlock,
   verifyDocumentsForChecklist,
 } from "./verifyDocumentAvailability.js";
+import { ingestUploadedDocuments } from "./ingestUploadedDocuments.js";
+import { syncSubmissionPackage, resolveSubmissionFolderLink } from "../drive/syncSubmissionPackage.js";
 import { checklistDebug714167 } from "../debug/checklistDebug714167.js";
 
 /**
@@ -1061,7 +1063,7 @@ export function partitionVerifyResultsForChecklist(verifyResults, structured) {
 
   for (const row of verifyResults) {
     const { doc, verify } = row;
-    if (isVerifyStatusAlreadyHave(verify.status)) {
+    if (isVerifyStatusAlreadyHave(verify.status, doc.id)) {
       alreadyHave.push(row);
     } else if (shouldShowInLenaPrepareBlock(doc, verify, structured)) {
       lenaPrepare.push(row);
@@ -1098,8 +1100,9 @@ function formatNeedUploadTelegramLines(needUpload, linkById) {
  * @param {{ doc: NormalizedDoc, verify: import("./verifyDocumentAvailability.js").DocumentVerifyResult }[]} verifyResults
  * @param {import("./ensureDocumentUploadTargets.js").DocumentUploadTarget[]} uploadTargets
  * @param {AnalysisStructured} structured
+ * @param {{ submissionFolderLink?: string | null }} [opts]
  */
-export function formatUploadRecheckTelegram(verifyResults, uploadTargets, structured) {
+export function formatUploadRecheckTelegram(verifyResults, uploadTargets, structured, opts = {}) {
   const linkById = new Map(uploadTargets.map((t) => [t.docId, t.webViewLink]));
   const { alreadyHave, lenaPrepare, needUpload } = partitionVerifyResultsForChecklist(
     verifyResults,
@@ -1132,6 +1135,11 @@ export function formatUploadRecheckTelegram(verifyResults, uploadTargets, struct
   }
 
   lines.push("", UPLOAD_RECHECK_DISCLAIMER);
+
+  if (opts.submissionFolderLink) {
+    lines.push("", `**Комплект для печати:** [submission](${opts.submissionFolderLink})`);
+  }
+
   return lines.join("\n");
 }
 
@@ -1232,6 +1240,22 @@ export async function buildRefinedChecklistTelegramBundle(
     "H1",
   );
   // #endregion
+
+  if (bundleOpts.runIngest !== false) {
+    try {
+      await ingestUploadedDocuments(
+        userRootId,
+        tenderId,
+        offerOrg,
+        requiredDocuments,
+        structured,
+        { flat: treeOpts.flat, year: treeOpts.year },
+      );
+    } catch {
+      /* ingest optional on network errors */
+    }
+  }
+
   const verifyResults = await verifyDocumentsForChecklist(
     userRootId,
     tenderId,
@@ -1257,7 +1281,7 @@ export async function buildRefinedChecklistTelegramBundle(
   const needUploadDocs = verifyResults
     .filter(({ doc, verify }) => {
       if (shouldShowInLenaPrepareBlock(doc, verify, structured)) return false;
-      if (isVerifyStatusAlreadyHave(verify.status)) return false;
+      if (isVerifyStatusAlreadyHave(verify.status, doc.id)) return false;
       return true;
     })
     .map(({ doc }) => doc);
@@ -1303,6 +1327,23 @@ export async function buildRefinedChecklistTelegramBundle(
 
   const { lenaPrepare, managerUpload } = buildRefinedChecklist(requiredDocuments, offerOrg, structured);
 
+  let submissionFolderLink = null;
+  if (bundleOpts.syncSubmission !== false) {
+    try {
+      const manifest = await syncSubmissionPackage(
+        userRootId,
+        tenderId,
+        offerOrg,
+        requiredDocuments,
+        structured,
+        treeOpts,
+      );
+      submissionFolderLink = manifest.submissionFolderWebViewLink;
+    } catch {
+      submissionFolderLink = await resolveSubmissionFolderLink(userRootId, tenderId, treeOpts);
+    }
+  }
+
   const text = formatRefinedChecklistStep2Telegram(
     structured,
     offerOrg,
@@ -1319,5 +1360,13 @@ export async function buildRefinedChecklistTelegramBundle(
     "H1",
   );
   // #endregion
-  return { text, lenaPrepare, managerUpload, uploadTargets, formHints, verifyResults };
+  return {
+    text,
+    lenaPrepare,
+    managerUpload,
+    uploadTargets,
+    formHints,
+    verifyResults,
+    submissionFolderLink,
+  };
 }

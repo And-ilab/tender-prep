@@ -195,6 +195,30 @@ export async function driveMultipartUpload(folderId, localPath, destName) {
 }
 
 /**
+ * Переместить файл в другую папку.
+ * @param {string} fileId
+ * @param {string} destFolderId
+ * @param {string} [removeParentId]
+ */
+export async function driveFilesMove(fileId, destFolderId, removeParentId) {
+  const token = await getDriveAccessToken();
+  const u = new URL(`${DRIVE_V3}/files/${encodeURIComponent(fileId)}`);
+  u.searchParams.set("supportsAllDrives", "true");
+  u.searchParams.set("includeItemsFromAllDrives", "true");
+  u.searchParams.set("addParents", destFolderId);
+  if (removeParentId) u.searchParams.set("removeParents", removeParentId);
+  u.searchParams.set("fields", "id, name, webViewLink, mimeType, parents");
+  const res = await fetch(u.toString(), {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: "{}",
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Drive move ${res.status}: ${text.slice(0, 500)}`);
+  return JSON.parse(text);
+}
+
+/**
  * В корзину Drive (файл исчезает из папки).
  * @param {string} fileId
  */

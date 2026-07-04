@@ -138,6 +138,13 @@ export const CANONICAL_DOCUMENT_TYPES = [
     preparedByDefault: "manager",
   },
   {
+    id: "director_appointment_order",
+    title: "Приказ о назначении директора",
+    synonyms: ["приказ о назначении", "назначении директор", "назначении генеральн", "приказ", "генеральн директор"],
+    storage: "founding",
+    preparedByDefault: "manager",
+  },
+  {
     id: "founding_documents",
     title: "Учредительные документы",
     synonyms: ["учредительные документы", "учредительн"],
@@ -148,14 +155,14 @@ export const CANONICAL_DOCUMENT_TYPES = [
     id: "power_of_attorney",
     title: "Доверенность на подачу",
     synonyms: ["доверенност", "представител"],
-    storage: "tender",
+    storage: "org",
     preparedByDefault: "manager",
   },
   {
     id: "reference_list",
     title: "Референс-лист",
-    synonyms: ["референс-лист", "reference list"],
-    storage: "tender",
+    synonyms: ["референс-лист", "reference list", "отзыв", "референс"],
+    storage: "org",
     preparedByDefault: "manager",
   },
   {
@@ -226,6 +233,22 @@ export const CANONICAL_DOCUMENT_TYPES = [
 ];
 
 const BY_ID = new Map(CANONICAL_DOCUMENT_TYPES.map((d) => [d.id, d]));
+
+/** Canonical ids переиспользуемых документов (founding + org), не per-tender. */
+export const SHARED_REUSABLE_DOC_IDS = CANONICAL_DOCUMENT_TYPES.filter(
+  (d) => d.storage === "founding" || d.storage === "org",
+).map((d) => d.id);
+
+/**
+ * @param {{ id?: string, storage?: DocumentStorage } | string} docOrId
+ * @returns {boolean}
+ */
+export function isSharedReusableDocument(docOrId) {
+  const id = typeof docOrId === "string" ? docOrId : docOrId.id;
+  if (!id) return false;
+  const t = BY_ID.get(id);
+  return t?.storage === "founding" || t?.storage === "org";
+}
 
 /**
  * @param {string} raw

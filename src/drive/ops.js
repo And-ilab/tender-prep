@@ -10,6 +10,7 @@ import {
   driveFilesCreate,
   driveFilesGetMeta,
   driveFilesList,
+  driveFilesMove,
   driveFilesTrash,
   driveFilesUpdate,
   driveMultipartUpload,
@@ -112,4 +113,34 @@ export async function exportGoogleFile(fileId, exportMime, destPath) {
 export async function trashDriveFile(fileId) {
   assertCredentialsFile();
   await driveFilesTrash(fileId);
+}
+
+const SHORTCUT_MIME = "application/vnd.google-apps.shortcut";
+
+/**
+ * @param {string} targetFileId
+ * @param {string} destFolderId
+ * @param {string} name
+ */
+export async function createDriveShortcut(targetFileId, destFolderId, name) {
+  assertCredentialsFile();
+  return driveFilesCreate(
+    {
+      name,
+      mimeType: SHORTCUT_MIME,
+      parents: [destFolderId],
+      shortcutDetails: { targetId: targetFileId },
+    },
+    "id, name, webViewLink, mimeType, shortcutDetails",
+  );
+}
+
+/**
+ * @param {string} fileId
+ * @param {string} destFolderId
+ * @param {string} [removeParentId]
+ */
+export async function moveFileToFolder(fileId, destFolderId, removeParentId) {
+  assertCredentialsFile();
+  return driveFilesMove(fileId, destFolderId, removeParentId);
 }

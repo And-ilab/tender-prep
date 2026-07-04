@@ -16,7 +16,7 @@
     "icetrade:diagnose-download-headless": "node scripts/icetrade-download-diagnose.mjs",
     "icetrade:headless-smoke": "node scripts/icetrade-headless-smoke.mjs",
     "icetrade:smoke-demo-log": "node scripts/icetrade-headless-smoke.mjs --verbose",
-    "test": "node --test src/analysis/**/*.test.mjs src/icetrade/**/*.test.mjs src/telegram/**/*.test.mjs"
+    "test": "node --test src/analysis/**/*.test.mjs src/drive/**/*.test.mjs src/icetrade/**/*.test.mjs src/telegram/**/*.test.mjs"
   },
   "engines": {
     "node": ">=20"

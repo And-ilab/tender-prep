@@ -4,6 +4,7 @@ import { ensureChildFolder, findChildFolderId } from "./folders.js";
 import {
   LENA_ROOT_FOLDER,
   LENA_SUB,
+  ORG_REFERENCES_SUBFOLDER,
   TENDER_SUB,
   defaultTenderCalendarYear,
   lenaCompanyDriveSubfolderNames,
@@ -13,6 +14,7 @@ import {
 import {
   copyFileToFolder,
   downloadFile,
+  driveFolderWebLink,
   exportGoogleFile,
   getMetadata,
   listChildren,
@@ -93,6 +95,8 @@ export async function ensureLenaTree(userRootId) {
     if (tc.created) created.push(`${LENA_ROOT_FOLDER}/${LENA_SUB.templates}/${co}`);
     const oc = await ensureChildFolder(rO.id, co);
     if (oc.created) created.push(`${LENA_ROOT_FOLDER}/${LENA_SUB.orgDocs}/${co}`);
+    const ref = await ensureChildFolder(oc.id, ORG_REFERENCES_SUBFOLDER);
+    if (ref.created) created.push(`${LENA_ROOT_FOLDER}/${LENA_SUB.orgDocs}/${co}/${ORG_REFERENCES_SUBFOLDER}`);
     const fc = await ensureChildFolder(rF.id, co);
     if (fc.created) created.push(`${LENA_ROOT_FOLDER}/${LENA_SUB.foundingDocs}/${co}`);
   }
@@ -158,6 +162,10 @@ export async function ensureTenderTree(userRootId, tenderId, opts) {
   if (rEx.created) created.push(`tender:${tName}/${TENDER_SUB.exports}`);
   const rAt = await ensureChildFolder(tenderRoot, TENDER_SUB.attachments);
   if (rAt.created) created.push(`tender:${tName}/${TENDER_SUB.attachments}`);
+  const rSub = await ensureChildFolder(rAt.id, TENDER_SUB.submission);
+  if (rSub.created) created.push(`tender:${tName}/${TENDER_SUB.attachments}/${TENDER_SUB.submission}`);
+  const rInc = await ensureChildFolder(rAt.id, TENDER_SUB.incoming);
+  if (rInc.created) created.push(`tender:${tName}/${TENDER_SUB.attachments}/${TENDER_SUB.incoming}`);
   const rNo = await ensureChildFolder(tenderRoot, TENDER_SUB.notes);
   if (rNo.created) created.push(`tender:${tName}/${TENDER_SUB.notes}`);
 
@@ -172,6 +180,8 @@ export async function ensureTenderTree(userRootId, tenderId, opts) {
       draftsId: rDr.id,
       exportsId: rEx.id,
       attachmentsId: rAt.id,
+      submissionFolderId: rSub.id,
+      incomingFolderId: rInc.id,
       notesId: rNo.id,
     },
     created,
@@ -475,7 +485,13 @@ export async function buildAgentDriveBundle(userRootId, tenderId, tenderOpts) {
       draftsFolderId: tender.draftsId,
       exportsFolderId: tender.exportsId,
       attachmentsFolderId: tender.attachmentsId,
+      submissionFolderId: tender.submissionFolderId ?? null,
+      submissionFolderWebViewLink: tender.submissionFolderId
+        ? driveFolderWebLink(tender.submissionFolderId)
+        : null,
+      incomingFolderId: tender.incomingFolderId ?? null,
       notesFolderId: tender.notesId,
+      submissionPackageManifestFile: "submission-package.json",
     };
   }
 

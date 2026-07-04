@@ -6,7 +6,7 @@ import { downloadFile } from "../drive/ops.js";
 import { extractBufferToText } from "../icetrade/inputDocumentsExtract.js";
 import { CANONICAL_DOCUMENT_TYPES, normalizeToCanonicalDocument } from "./canonicalDocumentTypes.js";
 import { fileMatchesCanonicalType } from "./resolveDocumentFormSource.js";
-import { extractFirstDateIso } from "./verifyDocumentAvailability.js";
+import { extractFirstDateIso, extractPoaExpiryDateIso } from "./verifyDocumentAvailability.js";
 
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 const IMAGE_RE = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
@@ -70,6 +70,8 @@ export function classifyTextToCanonicalId(text, fileName, scopeIds) {
     if (t.id === "balance_sheet" && /форма\s*1|бухгалтерск/i.test(blob)) score += 6;
     if (t.id === "income_statement" && /форма\s*2|офр|финансовых\s+результат/i.test(blob)) score += 6;
     if (t.id === "bank_reference" && /справк\w*\s+(?:из\s+)?банк/i.test(blob)) score += 6;
+    if (t.id === "power_of_attorney" && /доверенност/i.test(blob)) score += 8;
+    if (t.id === "reference_list" && /отзыв|референс|reference/i.test(blob)) score += 6;
     if (!best || score > best.score) best = { canonicalId: t.id, title: t.title, score };
   }
   if (!best || best.score < 10) {
@@ -122,7 +124,10 @@ export async function extractAndIdentifyDriveFile(fileId, fileName, mimeType, op
     }
 
     const hit = classifyTextToCanonicalId(text, fileName, opts.scopeIds);
-    const documentDateIso = extractFirstDateIso(text) ?? extractFirstDateIso(fileName);
+    let documentDateIso = extractFirstDateIso(text) ?? extractFirstDateIso(fileName);
+    if (hit?.canonicalId === "power_of_attorney") {
+      documentDateIso = extractPoaExpiryDateIso(text) ?? documentDateIso;
+    }
     const reportingPeriod = extractReportingPeriod(text) ?? extractReportingPeriod(fileName);
 
     return {

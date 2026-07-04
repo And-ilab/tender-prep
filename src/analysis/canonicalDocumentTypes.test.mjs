@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeToCanonicalDocument } from "./canonicalDocumentTypes.js";
+import { normalizeToCanonicalDocument, getCanonicalTypeById, isSharedReusableDocument } from "./canonicalDocumentTypes.js";
 import {
   isManufacturerOnlyRequirement,
   isNonResidentOnlyRequirement,
@@ -45,6 +45,15 @@ describe("normalizeToCanonicalDocument", () => {
       "сертификат о происхождении товара для государств, не являющихся участниками СНГ",
     );
     assert.equal(r.id, "certificate_of_origin");
+  });
+});
+
+describe("shared reusable taxonomy", () => {
+  it("power_of_attorney and reference_list are org storage", () => {
+    assert.equal(getCanonicalTypeById("power_of_attorney")?.storage, "org");
+    assert.equal(getCanonicalTypeById("reference_list")?.storage, "org");
+    assert.equal(isSharedReusableDocument("power_of_attorney"), true);
+    assert.equal(isSharedReusableDocument("commercial_proposal"), false);
   });
 });
 

@@ -1554,6 +1554,7 @@ async function runManagerDocsRecheck(chatId, msgId, token, pending) {
       bundle.verifyResults,
       bundle.uploadTargets,
       pending.analysisStructured,
+      { submissionFolderLink: bundle.submissionFolderLink },
     );
     const recheckHtml = checklistMarkdownToTelegramHtml(recheckText);
     const checklistOpts = { parseMode: /** @type {const} */ ("HTML") };

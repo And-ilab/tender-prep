@@ -53,8 +53,18 @@ export const TENDER_SUB = {
   drafts: "drafts",
   exports: "exports",
   attachments: "attachments",
+  /** Ярлыки на shared masters + физические tender-only файлы для печати. */
+  submission: "submission",
+  /** Staging: загрузка под тендер до ingest → master-папка. */
+  incoming: "_incoming",
   notes: "notes",
 };
+
+/** Подпапка пула отзывов внутри org-docs/{company}/ */
+export const ORG_REFERENCES_SUBFOLDER = "references";
+
+/** Имя JSON-реестра документов компании на Drive. */
+export const COMPANY_DOCS_INDEX_FILENAME = "company-docs-index.json";
 
 /**
  * @param {string} tenderId
