@@ -1199,6 +1199,22 @@ async function sendMarkdownHtmlChunks(chatId, replyTo, markdown, replyMarkupLast
 }
 
 /**
+ * @param {Awaited<ReturnType<typeof runCommercialProposalDraftToDrive>>} r
+ */
+function buildCommercialProposalSuccessTelegram(r) {
+  const w = r.warnings?.length ? `\n\nПредупреждения: ${r.warnings.slice(0, 6).join(" | ")}` : "";
+  const mdExtra = r.markdownFileName ? `\n\nMarkdown в drafts: ${r.markdownFileName}` : "";
+  const nameLine = r.googleDocFileName ?? r.fileName;
+  const statusLine = nameLine
+    ? `Коммерческое предложение сформировано: ${nameLine}.`
+    : "Черновик КП загружен.";
+  const linkLine = r.submissionFolderWebViewLink
+    ? `\n\nКомплект для печати: ${r.submissionFolderWebViewLink}`
+    : "\n\nПапка submission не найдена на Drive.";
+  return [statusLine, linkLine, mdExtra, w].filter(Boolean).join("");
+}
+
+/**
  * @param {number} chatId
  * @param {number} [replyTo]
  * @param {string} text
@@ -1987,20 +2003,7 @@ async function handleCallbackQuery(cq) {
         await sendText(chatId, msgId, `КП: ошибка — ${r.error || "неизвестно"}${w}`);
         return;
       }
-      const w = r.warnings?.length ? `\n\nПредупреждения: ${r.warnings.slice(0, 6).join(" | ")}` : "";
-      const mdExtra =
-        r.markdownFileName && r.googleDocWebViewLink
-          ? `\n\nТакже Markdown: ${r.markdownFileName}`
-          : "";
-      const baseHead =
-        r.googleDocWebViewLink && r.googleDocFileName
-          ? `Коммерческое предложение в Google Doc: ${r.googleDocFileName} (папка drafts тендера).`
-          : `Черновик КП загружен: ${r.fileName} (папка drafts).`;
-      const linkOut = r.googleDocWebViewLink ?? r.webViewLink;
-      const linkLine = linkOut
-        ? `\n\n${r.googleDocWebViewLink ? "Ссылка на Google Doc:" : "Ссылка на файл в Drive:"} ${linkOut}`
-        : "";
-      await sendText(chatId, msgId, [baseHead, linkLine, mdExtra, w].filter(Boolean).join(""));
+      await sendText(chatId, msgId, buildCommercialProposalSuccessTelegram(r));
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e);
       await sendText(chatId, msgId, `КП: ошибка — ${err.slice(0, 3500)}`);
@@ -2335,20 +2338,7 @@ async function handleCallbackQuery(cq) {
         await sendText(chatId, headMid ?? msgId, `КП: ошибка — ${r.error || "неизвестно"}${w}`);
         return;
       }
-      const w = r.warnings?.length ? `\n\nПредупреждения: ${r.warnings.slice(0, 6).join(" | ")}` : "";
-      const mdExtra =
-        r.markdownFileName && r.googleDocWebViewLink
-          ? `\n\nТакже Markdown: ${r.markdownFileName}`
-          : "";
-      const baseHead =
-        r.googleDocWebViewLink && r.googleDocFileName
-          ? `Коммерческое предложение в Google Doc: ${r.googleDocFileName} (папка drafts тендера).`
-          : `Черновик КП загружен: ${r.fileName} (папка drafts).`;
-      const linkOut = r.googleDocWebViewLink ?? r.webViewLink;
-      const linkLine = linkOut
-        ? `\n\n${r.googleDocWebViewLink ? "Ссылка на Google Doc:" : "Ссылка на файл в Drive:"} ${linkOut}`
-        : "";
-      await sendText(chatId, headMid ?? msgId, [baseHead, linkLine, mdExtra, w].filter(Boolean).join(""));
+      await sendText(chatId, headMid ?? msgId, buildCommercialProposalSuccessTelegram(r));
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e);
       await sendText(chatId, headMid ?? msgId, `КП: ошибка — ${err.slice(0, 3500)}`);

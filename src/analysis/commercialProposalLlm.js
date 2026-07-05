@@ -9,8 +9,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { assertCredentialsFile } from "../drive/config.js";
-import { LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG } from "../drive/layoutConstants.js";
-import { getMetadata, listChildren, uploadFile } from "../drive/ops.js";
+import { LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG, TENDER_SUB } from "../drive/layoutConstants.js";
+import { findChildFolderId } from "../drive/folders.js";
+import { createDriveShortcut, driveFolderWebLink, getMetadata, listChildren, uploadFile } from "../drive/ops.js";
 import { ensureTenderTree } from "../drive/workspace.js";
 import { chatCompletion, isLlmConfigured } from "../llm/openaiCompatible.js";
 import { buildParsedInputsCorpus } from "./parsedInputsCorpus.js";
@@ -320,6 +321,8 @@ export async function runCommercialProposalDraftToDrive(userRootId, tenderId, op
   let googleDocWebViewLink;
   /** @type {string | undefined} */
   let googleDocFileName;
+  /** @type {string | undefined} */
+  let googleDocFileId;
 
   if (offerOrg && isOfferOrgKey(offerOrg)) {
     const templateId = await resolveCommercialProposalGoogleDocTemplateId(userRootId, offerOrg);
@@ -342,6 +345,7 @@ export async function runCommercialProposalDraftToDrive(userRootId, tenderId, op
         });
         googleDocWebViewLink = doc.webViewLink;
         googleDocFileName = doc.fileName;
+        googleDocFileId = doc.documentId;
         if (doc.fillMode === "append") {
           warnings.push(
             `В шаблоне нет **${KP_BODY_PLACEHOLDER}** или **${KP_TEMPLATE_BODY}** — текст КП дописан в конец документа.`,
@@ -380,12 +384,31 @@ export async function runCommercialProposalDraftToDrive(userRootId, tenderId, op
     fileName = outName;
   }
 
+  /** @type {string | null | undefined} */
+  let submissionFolderWebViewLink;
+  try {
+    let submissionFolderId = tender.submissionFolderId;
+    if (!submissionFolderId && tender.attachmentsId) {
+      submissionFolderId = await findChildFolderId(tender.attachmentsId, TENDER_SUB.submission);
+    }
+    if (submissionFolderId) {
+      submissionFolderWebViewLink = driveFolderWebLink(submissionFolderId);
+      if (googleDocFileId) {
+        await createDriveShortcut(googleDocFileId, submissionFolderId, driveCopyTitle);
+      }
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    warnings.push(`Ярлык КП в submission не создан: ${msg.slice(0, 180)}`);
+  }
+
   return {
     ok: true,
     fileName: fileName ?? outName,
     webViewLink,
     googleDocWebViewLink,
     googleDocFileName,
+    submissionFolderWebViewLink: submissionFolderWebViewLink ?? null,
     markdownFileName: saveMd ? outName : undefined,
     draftsFolderId: parsed.draftsId,
     warnings,
