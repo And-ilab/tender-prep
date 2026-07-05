@@ -12,6 +12,7 @@ import { assertCredentialsFile } from "../drive/config.js";
 import { LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG, TENDER_SUB } from "../drive/layoutConstants.js";
 import { findChildFolderId } from "../drive/folders.js";
 import { createDriveShortcut, driveFolderWebLink, getMetadata, listChildren, uploadFile } from "../drive/ops.js";
+import { rebuildSubmissionPrintPackage } from "../drive/syncSubmissionPackage.js";
 import { ensureTenderTree } from "../drive/workspace.js";
 import { chatCompletion, isLlmConfigured } from "../llm/openaiCompatible.js";
 import { buildParsedInputsCorpus } from "./parsedInputsCorpus.js";
@@ -435,20 +436,38 @@ export async function runCommercialProposalDraftToDrive(userRootId, tenderId, op
 
   /** @type {string | null | undefined} */
   let submissionFolderWebViewLink;
-  try {
-    let submissionFolderId = tender.submissionFolderId;
-    if (!submissionFolderId && tender.attachmentsId) {
-      submissionFolderId = await findChildFolderId(tender.attachmentsId, TENDER_SUB.submission);
+  if (offerOrg && isOfferOrgKey(offerOrg) && opts.structured && opts.requiredDocuments?.length) {
+    try {
+      const manifest = await rebuildSubmissionPrintPackage(
+        userRootId,
+        tenderId,
+        offerOrg,
+        opts.structured,
+        opts.requiredDocuments,
+        treeOpts,
+        { corpus, runIngest: true, inputFiles: opts.inputFiles },
+      );
+      submissionFolderWebViewLink = manifest.submissionFolderWebViewLink;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      warnings.push(`Комплект submission не обновлён: ${msg.slice(0, 180)}`);
     }
-    if (submissionFolderId) {
-      submissionFolderWebViewLink = driveFolderWebLink(submissionFolderId);
-      if (googleDocFileId) {
-        await createDriveShortcut(googleDocFileId, submissionFolderId, driveCopyTitle);
+  } else {
+    try {
+      let submissionFolderId = tender.submissionFolderId;
+      if (!submissionFolderId && tender.attachmentsId) {
+        submissionFolderId = await findChildFolderId(tender.attachmentsId, TENDER_SUB.submission);
       }
+      if (submissionFolderId) {
+        submissionFolderWebViewLink = driveFolderWebLink(submissionFolderId);
+        if (googleDocFileId) {
+          await createDriveShortcut(googleDocFileId, submissionFolderId, driveCopyTitle);
+        }
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      warnings.push(`Ярлык КП в submission не создан: ${msg.slice(0, 180)}`);
     }
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    warnings.push(`Ярлык КП в submission не создан: ${msg.slice(0, 180)}`);
   }
 
   return {

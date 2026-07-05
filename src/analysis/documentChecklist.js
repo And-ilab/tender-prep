@@ -1337,6 +1337,11 @@ export async function buildRefinedChecklistTelegramBundle(
         requiredDocuments,
         structured,
         treeOpts,
+        {
+          verifyResults,
+          corpus: bundleOpts.corpus ?? "",
+          inputFiles: bundleOpts.inputFiles,
+        },
       );
       submissionFolderLink = manifest.submissionFolderWebViewLink;
     } catch {

@@ -2300,6 +2300,11 @@ async function handleCallbackQuery(cq) {
       return;
     }
     parseOrgGoConsumed.add(token);
+    const submissionCtx = {
+      structured: pending.analysisStructured,
+      requiredDocuments: pending.requiredDocuments,
+      corpus: pending.analysisHintsCorpus,
+    };
     parseOrgPending.delete(token);
     unregisterManagerPriceAnchorsForToken(token);
 
@@ -2332,7 +2337,13 @@ async function handleCallbackQuery(cq) {
     const stopPulse = startChatActionPulse(chatId, chatActionForLlmDraft());
     try {
       assertCredentialsFile();
-      const r = await runCommercialProposalDraftToDrive(rootId, tenderId, { ...treeOpts, offerOrg });
+      const r = await runCommercialProposalDraftToDrive(rootId, tenderId, {
+        ...treeOpts,
+        offerOrg,
+        structured: submissionCtx.structured,
+        requiredDocuments: submissionCtx.requiredDocuments,
+        corpus: submissionCtx.corpus,
+      });
       if (!r.ok) {
         const w = r.warnings?.length ? `\n\n${r.warnings.slice(0, 5).join(" | ")}` : "";
         await sendText(chatId, headMid ?? msgId, `КП: ошибка — ${r.error || "неизвестно"}${w}`);
