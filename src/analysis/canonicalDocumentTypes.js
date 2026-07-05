@@ -28,6 +28,9 @@ export const CANONICAL_DOCUMENT_TYPES = [
       "предложение участника",
       "предложения участника",
       "предложение по форме",
+      "предложение на поставку",
+      "предложение на оказание",
+      "предложение на выполнение",
     ],
     storage: "tender",
     preparedByDefault: "lena",
@@ -254,6 +257,26 @@ export function isSharedReusableDocument(docOrId) {
 }
 
 /**
+ * «Предложение» / «Предложение на поставку…» в КД заказчика = коммерческое предложение (КП), не отдельный тип.
+ * @param {string} raw
+ */
+export function isCommercialProposalAlias(raw) {
+  const low = String(raw ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+  if (!low) return false;
+  if (/техническ\S*\s+предлож/i.test(low) || /тех\s*\.?\s*предлож/i.test(low)) return false;
+  if (/коммерческ\S*\s+предлож/i.test(low)) return true;
+  if (/^кп\b/.test(low)) return true;
+  if (/ценов\S*\s+предлож/i.test(low)) return true;
+  if (/предложени[а-яё]*\s+участник/i.test(low)) return true;
+  if (/^предложени[а-яё]*(?:\s|$)/.test(low)) return true;
+  if (/^предложени[а-яё]*\s+на\s+(?:поставку|оказание|выполнение|услуг|работ)/i.test(low)) return true;
+  return false;
+}
+
+/**
  * @param {string} raw
  * @returns {{ id: string, title: string, storage: DocumentStorage, preparedByDefault: DocumentPreparedBy, confidence: "high" | "low", rawName: string }}
  */
@@ -269,6 +292,20 @@ export function normalizeToCanonicalDocument(raw) {
       confidence: "low",
       rawName,
     };
+  }
+
+  if (isCommercialProposalAlias(rawName)) {
+    const cp = BY_ID.get("commercial_proposal");
+    if (cp) {
+      return {
+        id: cp.id,
+        title: cp.title,
+        storage: cp.storage,
+        preparedByDefault: cp.preparedByDefault,
+        confidence: "high",
+        rawName,
+      };
+    }
   }
 
   let best = /** @type {CanonicalDocumentType | null} */ (null);

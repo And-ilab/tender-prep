@@ -1,6 +1,7 @@
 import {
   CANONICAL_DOCUMENT_TYPES,
   normalizeToCanonicalDocument,
+  isCommercialProposalAlias,
 } from "./canonicalDocumentTypes.js";
 import { ensureDocumentUploadTargets } from "./ensureDocumentUploadTargets.js";
 import { listChildren } from "../drive/ops.js";
@@ -495,6 +496,31 @@ export function sortSubmissionDocuments(docs) {
 }
 
 /**
+ * Один документ КП: «Предложение» и «Коммерческое предложение» не дублируем.
+ * @param {NormalizedDoc[]} docs
+ * @returns {NormalizedDoc[]}
+ */
+export function mergeCommercialProposalDuplicates(docs) {
+  const cpDocs = docs.filter((d) => d.id === "commercial_proposal");
+  const aliasOthers = docs.filter((d) => d.id === "other" && isCommercialProposalAlias(d.rawName ?? d.title));
+  if (cpDocs.length === 0 && aliasOthers.length === 0) return docs;
+
+  /** @type {NormalizedDoc | undefined} */
+  let primary = cpDocs.find((d) => d.source === "lena") ?? cpDocs[0] ?? aliasOthers.find((d) => d.source === "lena");
+  if (!primary) {
+    primary = {
+      ...normalizeToCanonicalDocument("Коммерческое предложение"),
+      source: aliasOthers[0]?.source ?? "lena",
+    };
+  }
+
+  const filtered = docs.filter(
+    (d) => d.id !== "commercial_proposal" && !(d.id === "other" && isCommercialProposalAlias(d.rawName ?? d.title)),
+  );
+  return sortSubmissionDocuments([primary, ...filtered]);
+}
+
+/**
  * Плоский список состава документов по КД (шаг 1 Telegram).
  * @param {AnalysisStructured} structured
  * @param {{ corpus?: string }} [opts]
@@ -539,7 +565,7 @@ export function buildRequiredDocumentsList(structured, opts = {}) {
       },
     ]);
   }
-  return list;
+  return mergeCommercialProposalDuplicates(list);
 }
 
 /**

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeToCanonicalDocument, getCanonicalTypeById, isSharedReusableDocument } from "./canonicalDocumentTypes.js";
+import { normalizeToCanonicalDocument, getCanonicalTypeById, isSharedReusableDocument, isCommercialProposalAlias } from "./canonicalDocumentTypes.js";
 import {
   isManufacturerOnlyRequirement,
   isNonResidentOnlyRequirement,
@@ -38,6 +38,14 @@ describe("normalizeToCanonicalDocument", () => {
   it("maps compliance statement", () => {
     const r = normalizeToCanonicalDocument("Заявление о соответствии");
     assert.equal(r.id, "compliance_statement");
+  });
+
+  it("maps bare Предложение and Предложение на поставку to commercial proposal", () => {
+    assert.equal(normalizeToCanonicalDocument("Предложение").id, "commercial_proposal");
+    assert.equal(normalizeToCanonicalDocument("Предложение на поставку товара").id, "commercial_proposal");
+    assert.equal(normalizeToCanonicalDocument("Коммерческое предложение").id, "commercial_proposal");
+    assert.equal(isCommercialProposalAlias("Предложение на поставку товара"), true);
+    assert.equal(isCommercialProposalAlias("Техническое предложение"), false);
   });
 
   it("maps certificate of origin from non-CIS clause", () => {

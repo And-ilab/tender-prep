@@ -429,6 +429,27 @@ describe("buildRequiredDocumentsList", () => {
     );
     assert.ok(list.some((d) => d.id === "commercial_proposal"));
   });
+
+  it("merges Предложение and Коммерческое предложение into one checklist item", () => {
+    const list = buildRequiredDocumentsList(
+      {
+        tenderTitle: null,
+        sumOrBudget: null,
+        submissionOverview: null,
+        submissionMethod: null,
+        submissionDeadline: null,
+        lenaCanPrepare: [
+          { name: "Коммерческое предложение", basis: "п.3.2", evidence: "коммерческое предложение" },
+          { name: "Предложение на поставку товара", basis: "п.3.2", evidence: "предложение на поставку товара" },
+        ],
+        managerMustProvide: [],
+      },
+      {},
+    );
+    const cp = list.filter((d) => d.id === "commercial_proposal");
+    assert.equal(cp.length, 1);
+    assert.ok(!list.some((d) => d.id === "other" && /предложени/i.test(d.rawName ?? "")));
+  });
 });
 
 describe("formatQualificationRequirementsTelegram", () => {
