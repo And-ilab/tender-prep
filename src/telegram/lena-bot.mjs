@@ -313,6 +313,7 @@ const CB_MGR_DOCS_CONTINUE = "lena_docs_go:";
 const CB_IMPORT_DOCS_DONE = "lena_import_docs:";
 /** Сброс зависшего шага / индикатора «отправляет файл» в этом чате. */
 const CB_RESET = "lena_reset";
+const RESET_REPLY_BUTTON = "Перезапуск";
 
 /** @type {Map<number, { stopPulse: () => void, kind: string }>} */
 const activeLongOps = new Map();
@@ -382,7 +383,15 @@ function clearPendingStateForChat(chatId) {
 }
 
 function buildResetInlineKeyboard() {
-  return { inline_keyboard: [[{ text: "Сбросить зависание", callback_data: CB_RESET }]] };
+  return { inline_keyboard: [[{ text: RESET_REPLY_BUTTON, callback_data: CB_RESET }]] };
+}
+
+function buildResetReplyKeyboard() {
+  return {
+    keyboard: [[{ text: RESET_REPLY_BUTTON }]],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
 }
 
 /**
@@ -397,12 +406,12 @@ async function resetChatSession(chatId, replyTo) {
     chatId,
     replyTo,
     [
-      "Сброс выполнен.",
+      "Перезапуск выполнен.",
       "Индикатор «отправляет файл» снят; незавершённые шаги тендера в этом чате очищены.",
       "Если команды всё равно не доходят несколько минут — на сервере перезапустите процесс бота (systemctl).",
       "Дальше: /tenderextract <номер> или /tenderkp <номер>.",
     ].join("\n"),
-    buildResetInlineKeyboard(),
+    buildResetReplyKeyboard(),
   );
 }
 
@@ -1504,6 +1513,12 @@ async function sendDocumentChecklistStep1(chatId, chainReplyTo, result, pToken) 
   await sendTextChunks(chatId, chainReplyTo, checklistHtml, buildOrgSelectKeyboard(pToken), {
     parseMode: "HTML",
   });
+  await sendText(
+    chatId,
+    chainReplyTo,
+    "Если бот зависнет — нажмите «Перезапуск» под полем ввода.",
+    buildResetReplyKeyboard(),
+  );
   // #region agent log
   checklistDebug714167(
     "lena-bot.mjs:sendDocumentChecklistStep1",
@@ -1910,7 +1925,7 @@ async function handleCallbackQuery(cq) {
   const msgId = replyTo;
 
   if (data === CB_RESET) {
-    await answerCallbackQuery(id, "Сброс…");
+    await answerCallbackQuery(id, "Перезапуск…");
     await resetChatSession(chatId, msgId);
     return;
   }
@@ -2123,7 +2138,7 @@ async function handleCallbackQuery(cq) {
       await sendText(
         chatId,
         msgId,
-        `КП: ошибка — ${err.slice(0, 3500)}\n\nЕсли индикатор «отправляет файл» не пропал — /reset`,
+        `КП: ошибка — ${err.slice(0, 3500)}\n\nЕсли индикатор «отправляет файл» не пропал — нажмите «Перезапуск» или /reset`,
         buildResetInlineKeyboard(),
       );
     } finally {
@@ -2479,7 +2494,7 @@ async function handleCallbackQuery(cq) {
       await sendText(
         chatId,
         headMid ?? msgId,
-        `КП: ошибка — ${err.slice(0, 3500)}\n\nЕсли индикатор «отправляет файл» не пропал — /reset`,
+        `КП: ошибка — ${err.slice(0, 3500)}\n\nЕсли индикатор «отправляет файл» не пропал — нажмите «Перезапуск» или /reset`,
         buildResetInlineKeyboard(),
       );
     } finally {
@@ -2924,7 +2939,7 @@ async function cmdHelp(chatId, replyTo) {
       "/tendercard <tender_id> [ГГГГ|flat] — карточка: текст из **inputs/** или **inputs/extracted** + HTML IceTrade + LLM",
       "/tenderkp <tender_id> [ГГГГ|flat] — КП (LLM): при необходимости мастер **цена → оплата → срок → гарантия** или **/tenderprice**; затем **ГС Ритейл** / **Финсельват** → **Сформировать КП** → **Google Doc** + Markdown в **drafts/** (**сначала** /tenderextract)",
       "/newchat — сбросить память для /ask в этом чате",
-      "/reset — сбросить зависший шаг тендера и индикатор «отправляет файл»",
+      "Кнопка «Перезапуск» под полем ввода (или /reset) — сброс зависшего шага и индикатора «отправляет файл»",
       "/product — цель продукта (IceTrade, Drive, политика RAG-корпуса)",
       "/help — это сообщение",
       "",
@@ -2935,6 +2950,7 @@ async function cmdHelp(chatId, replyTo) {
       "",
       `Корень Drive: ${rootId}`,
     ].join("\n"),
+    buildResetReplyKeyboard(),
   );
 }
 
@@ -3405,6 +3421,15 @@ async function main() {
 
       const replyTo = msg.message_id;
       if (typeof replyTo !== "number") continue;
+      if (bodyText.trim() === RESET_REPLY_BUTTON) {
+        try {
+          await resetChatSession(chatId, replyTo);
+        } catch (e) {
+          const err = e instanceof Error ? e.message : String(e);
+          await sendText(chatId, replyTo, `Ошибка: ${err.slice(0, 3500)}`);
+        }
+        continue;
+      }
       try {
         if (await tryConsumeManagerPriceGateReply(msg, bodyText, chatId, replyTo)) continue;
       } catch (e) {
