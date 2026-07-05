@@ -66,6 +66,9 @@ export const ORG_REFERENCES_SUBFOLDER = "references";
 /** Имя JSON-реестра документов компании на Drive. */
 export const COMPANY_DOCS_INDEX_FILENAME = "company-docs-index.json";
 
+/** Имя JSON-индекса статичного архива тендеров в `_lena/context/`. */
+export const ARCHIVE_DOCUMENTS_INDEX_FILENAME = "archive-documents-index.json";
+
 /**
  * @param {string} tenderId
  */

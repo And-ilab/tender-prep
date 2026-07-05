@@ -416,18 +416,6 @@ async function resetChatSession(chatId, replyTo) {
   chatWorkGeneration.set(chatId, (chatWorkGeneration.get(chatId) ?? 0) + 1);
   endLongOp(chatId);
   clearPendingStateForChat(chatId);
-  await sendChatAction(chatId, CHAT_ACTION.TYPING).catch(() => {});
-  await sendText(
-    chatId,
-    replyTo,
-    [
-      "Перезапуск выполнен.",
-      "Индикатор «отправляет файл» снят; незавершённые шаги тендера в этом чате очищены.",
-      "Если команды всё равно не доходят несколько минут — на сервере перезапустите процесс бота (systemctl).",
-      "Дальше: /tenderextract <номер> или /tenderkp <номер>.",
-    ].join("\n"),
-    buildResetReplyKeyboard(),
-  );
 }
 
 /**
@@ -1597,12 +1585,6 @@ async function sendDocumentChecklistStep1(chatId, chainReplyTo, result, pToken) 
   await sendTextChunks(chatId, chainReplyTo, checklistHtml, buildOrgSelectKeyboard(pToken), {
     parseMode: "HTML",
   });
-  await sendText(
-    chatId,
-    chainReplyTo,
-    "Если бот зависнет — нажмите «Перезапуск» под полем ввода.",
-    buildResetReplyKeyboard(),
-  );
   // #region agent log
   checklistDebug714167(
     "lena-bot.mjs:sendDocumentChecklistStep1",

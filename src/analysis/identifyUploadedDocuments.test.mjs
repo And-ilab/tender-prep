@@ -20,6 +20,17 @@ describe("identifyUploadedDocuments", () => {
     assert.equal(hit.canonicalId, "balance_sheet");
   });
 
+  it("classifyTextToCanonicalId textOnly ignores misleading filename", () => {
+    const hit = classifyTextToCanonicalId(
+      "Письмо о благонадёжности участника закупки. Подпись директора.",
+      "totally-unrelated.docx",
+      ["reliability_letter"],
+      { includeTenderTypes: true, textOnly: true },
+    );
+    assert.ok(hit);
+    assert.equal(hit.canonicalId, "reliability_letter");
+  });
+
   it("computeLastReportingQuarterHint uses submission deadline", () => {
     assert.equal(computeLastReportingQuarterHint("15.04.2026"), "2026-Q1");
     assert.equal(computeLastReportingQuarterHint("10.01.2026"), "2025-Q4");

@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   fileMatchesCanonicalType,
+  formatFormSourceTelegramHint,
   pickBestCustomerFormFile,
   pickBestTemplateFile,
   scoreCustomerFormFile,
@@ -42,5 +43,52 @@ describe("resolveDocumentFormSource", () => {
     );
     assert.ok(picked);
     assert.equal(picked.id, "2");
+  });
+
+  it("formatFormSourceTelegramHint uses simple customer phrase", () => {
+    const hint = formatFormSourceTelegramHint({
+      formSource: "customer",
+      canonicalId: "application_form",
+      title: "Заявка",
+      fileName: "форма.docx",
+      webViewLink: "https://drive.example/f",
+    });
+    assert.match(hint, /образец есть в КД/);
+    assert.match(hint, /\[форма\.docx\]/);
+  });
+
+  it("formatFormSourceTelegramHint uses simple archive phrase", () => {
+    const hint = formatFormSourceTelegramHint({
+      formSource: "archive",
+      canonicalId: "reliability_letter",
+      title: "Письмо",
+      fileName: "благонадежность.docx",
+      webViewLink: "https://drive.example/a",
+      archiveProject: "Проект X",
+      archiveYear: 2025,
+    });
+    assert.match(hint, /сделаю по образу из архива/);
+    assert.doesNotMatch(hint, /2024–2026/);
+  });
+
+  it("formatFormSourceTelegramHint is silent for template", () => {
+    assert.equal(
+      formatFormSourceTelegramHint({
+        formSource: "template",
+        canonicalId: "application_form",
+        title: "Заявка",
+        fileName: "tpl.docx",
+      }),
+      "",
+    );
+  });
+
+  it("formatFormSourceTelegramHint for missing", () => {
+    const hint = formatFormSourceTelegramHint({
+      formSource: "missing",
+      canonicalId: "application_form",
+      title: "Заявка",
+    });
+    assert.match(hint, /нет образца в КД и аналога в архиве/);
   });
 });

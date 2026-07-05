@@ -15,13 +15,13 @@ import {
   findFileForCanonicalId,
   isReportingPeriodValid,
 } from "./identifyUploadedDocuments.js";
-import { fileMatchesCanonicalType, resolveDocumentFormSource } from "./resolveDocumentFormSource.js";
+import { fileMatchesCanonicalType, isBankReferenceFileStem, resolveDocumentFormSource } from "./resolveDocumentFormSource.js";
 import { verifyStatusIsValidForPackage } from "./validateOrgDocumentRules.js";
 import { checklistDebug714167 } from "../debug/checklistDebug714167.js";
 
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 
-/** @typedef {"found_org" | "found_org_valid" | "found_org_expired" | "found_org_unparsed" | "found_founding" | "found_tender" | "form_customer" | "form_template" | "lena_draft" | "missing"} VerifyStatus */
+/** @typedef {"found_org" | "found_org_valid" | "found_org_expired" | "found_org_unparsed" | "found_founding" | "found_tender" | "form_customer" | "form_archive" | "form_template" | "lena_draft" | "missing"} VerifyStatus */
 
 /**
  * @typedef {Object} DocumentVerifyResult
@@ -82,6 +82,7 @@ export function shouldShowInLenaPrepareBlock(doc, verify, structured) {
   if (
     FORM_DRAFT_ORG_IDS.has(doc.id) &&
     (verify.status === "form_customer" ||
+      verify.status === "form_archive" ||
       verify.status === "form_template" ||
       verify.status === "lena_draft")
   ) {
@@ -133,6 +134,9 @@ export function findMatchingDriveFile(files, canonicalId) {
           "H2",
         );
         // #endregion
+        return { id, name };
+      }
+      if (canonicalId === "bank_reference" && isBankReferenceFileStem(stem)) {
         return { id, name };
       }
     }
@@ -392,6 +396,15 @@ async function verifyOrgFormDraftFallback(doc, userRootId, offerOrg, ctx) {
       note: "форма заказчика в inputs",
     };
   }
+  if (form.formSource === "archive") {
+    return {
+      status: "form_archive",
+      ...base,
+      fileName: form.fileName,
+      webViewLink: form.webViewLink,
+      note: "образ из архива",
+    };
+  }
   if (form.formSource === "template") {
     return {
       status: "form_template",
@@ -404,7 +417,7 @@ async function verifyOrgFormDraftFallback(doc, userRootId, offerOrg, ctx) {
   return {
     status: "lena_draft",
     ...base,
-    note: "нужна форма в inputs или образец в lena/templates",
+    note: "нет образца в КД и аналога в архиве",
   };
 }
 

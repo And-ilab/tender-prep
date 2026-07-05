@@ -1218,7 +1218,9 @@ export function formatRefinedChecklistStep2Telegram(
       const formHint = formHints.get(key);
       const formSuffix = formHint ? formatFormSourceTelegramHint(formHint) : "";
       const verifySuffix =
-        verify.status === "form_customer" || verify.status === "form_template"
+        verify.status === "form_customer" ||
+        verify.status === "form_archive" ||
+        verify.status === "form_template"
           ? formatVerifyTelegramSuffix(verify)
           : verify.status === "lena_draft" && verify.note
             ? ` — (${verify.note})`

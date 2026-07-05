@@ -12,6 +12,8 @@
 | **5 · Commercial terms** | мастер в Telegram, `/tenderprice` | ответы менеджера | `notes/manager-price-quote.md` | есть |
 | **6 · KP** | `runCommercialProposalDraftToDrive`, «Сформировать КП» | компания + условия + Preparation | `drafts/` | есть |
 
+Единые правила типографики и оформления пакета (Times New Roman 14, поля, заголовки, жирное для финансовых условий, нумерация) — константа в [`src/analysis/tenderDocumentFormattingPrompt.js`](../src/analysis/tenderDocumentFormattingPrompt.js); передаётся в системный промпт КП и в контекст черновиков форм (`runFormDraftToDrive.js`).
+
 ## Import (детали)
 
 1. Загрузка HTML карточки (HTTP / Playwright по `LENA_ICETRADE_PLAYWRIGHT`).
@@ -42,7 +44,7 @@
 
 ## Checklist (4b)
 
-Эталонные типы документов — [`src/analysis/canonicalDocumentTypes.js`](../src/analysis/canonicalDocumentTypes.js) (22 типа). Нормализация и фильтры — [`src/analysis/documentChecklist.js`](../src/analysis/documentChecklist.js). Источник формы бланка — [`src/analysis/resolveDocumentFormSource.js`](../src/analysis/resolveDocumentFormSource.js) (inputs заказчика → `_lena/templates/{org}`).
+Эталонные типы документов — [`src/analysis/canonicalDocumentTypes.js`](../src/analysis/canonicalDocumentTypes.js) (22 типа). Нормализация и фильтры — [`src/analysis/documentChecklist.js`](../src/analysis/documentChecklist.js). Источник формы бланка — [`src/analysis/resolveDocumentFormSource.js`](../src/analysis/resolveDocumentFormSource.js) (образец в **inputs** → аналог в **архивном JSON-индексе v2**, тип по **содержимому** при одноразовой сборке — [`archiveDocumentsIndex.js`](../src/drive/archiveDocumentsIndex.js), [`analyzeArchiveDocumentContent.js`](../src/analysis/analyzeArchiveDocumentContent.js) → `_lena/templates/{org}` внутренне).
 
 ### Шаг 1 (до выбора участника)
 
@@ -63,7 +65,7 @@
 Три блока Telegram:
 
 - **Уже есть** — valid после ingest (OCR PDF при необходимости);
-- **Подготовлю сама** — формы из inputs / шаблонов org (в т.ч. **письмо о благонадёжности**: org-docs → форма заказчика → `_lena/templates`);
+- **Подготовлю сама** — подсказки: **«образец есть в КД»** или **«сделаю по образу из архива»** (статичный индекс `_lena/context/archive-documents-index.json` v2, классификация по содержимому при сборке); при отсутствии обоих — **«нет образца в КД и аналога в архиве»**;
 - **Нужно догрузить** — missing / rejected / needsReview.
 
 Полный чеклист: ссылки на **master-папку** компании; hint «в комплект попадёт ярлык».

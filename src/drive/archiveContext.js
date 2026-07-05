@@ -10,16 +10,16 @@ import {
 } from "./workspace.js";
 
 /** @type {readonly string[]} */
-const DEFAULT_CUSTOMER_MARKERS = ["заказч", "требован", "извещ", "технич", "техзад"];
+export const DEFAULT_CUSTOMER_MARKERS = ["заказч", "требован", "извещ", "технич", "техзад"];
 
 /** @type {readonly string[]} */
-const DEFAULT_SUBMISSION_MARKERS = ["участ", "подач", "заяв", "коммерц", "предложен"];
+export const DEFAULT_SUBMISSION_MARKERS = ["участ", "подач", "заяв", "коммерц", "предложен"];
 
 /**
  * @param {string} envName
  * @param {readonly string[]} defaults
  */
-function markersFromEnv(envName, defaults) {
+export function markersFromEnv(envName, defaults) {
   const raw = process.env[envName]?.trim();
   if (!raw) return [...defaults];
   return raw
@@ -33,7 +33,7 @@ function markersFromEnv(envName, defaults) {
  * @param {string[]} customer
  * @param {string[]} submission
  */
-function classifyPath(pathFromArchiveRoot, customer, submission) {
+export function classifyPath(pathFromArchiveRoot, customer, submission) {
   const s = pathFromArchiveRoot.toLowerCase();
   const hasC = customer.some((m) => s.includes(m));
   const hasS = submission.some((m) => s.includes(m));
@@ -47,7 +47,7 @@ function classifyPath(pathFromArchiveRoot, customer, submission) {
  * @param {string} drivePath
  * @returns {{ project: string, underProject: string }}
  */
-function splitProject(drivePath) {
+export function splitProject(drivePath) {
   const parts = drivePath.split("/").filter(Boolean);
   if (parts.length === 0) return { project: "_корень_архива", underProject: "" };
   const project = parts[0];

@@ -1,9 +1,10 @@
 import { resolveDocumentFormSource } from "./resolveDocumentFormSource.js";
+import { buildTenderDocumentFormattingPromptSection } from "./tenderDocumentFormattingPrompt.js";
 
 /** @typedef {"application_form" | "budget_debt_statement" | "written_consent_contract" | "reliability_letter"} FormDraftCanonicalId */
 
 /**
- * Каркас генерации форм: приоритет customer inputs → org templates → missing.
+ * Каркас генерации форм: приоритет customer inputs → архив → org templates → missing.
  * Полное LLM-заполнение — отдельный шаг (как у КП).
  *
  * @param {string} userRootId
@@ -18,15 +19,19 @@ export async function runFormDraftToDrive(userRootId, offerOrg, doc, opts = {}) 
     ...opts,
     pickTemplateStrategy,
   });
+  const hasFormSource = form.formSource !== "missing";
   return {
-    ok: form.formSource !== "missing",
+    ok: hasFormSource,
     form,
     message:
       form.formSource === "customer"
         ? "Заполнить форму заказчика из inputs"
-        : form.formSource === "template"
-          ? "Адаптировать образец org из _lena/templates"
-          : "Нужна форма в inputs или образец в _lena/templates",
+        : form.formSource === "archive"
+          ? "Адаптировать по образу из архива"
+          : form.formSource === "template"
+            ? "Адаптировать образец org из _lena/templates"
+            : "Нет образца в КД и аналога в архиве",
+    formattingPrompt: hasFormSource ? buildTenderDocumentFormattingPromptSection() : undefined,
   };
 }
 

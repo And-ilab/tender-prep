@@ -60,11 +60,15 @@
 
 1. **Корень Лены** — папка, в которой после `workspace-ensure` есть `_lena/context` (тот же `<root>`, что в Telegram и в `agent-bundle`).
 2. **Архив** — отдельная папка на Drive (может быть вне `_lena`), расшарена на тот же сервисный аккаунт с правом **чтения** (для обхода достаточно просмотра и построения манифеста).
-3. Собрать индекс:  
+3. Собрать индекс (Markdown для RAG/чтения):  
    `node src/cli.js drive archive-context-build <URL_или_id_архива> <URL_или_id_корня_Лены> [maxDepth] [maxFiles]`  
    Команда строит Markdown и пытается загрузить его в `_lena/context`. Если загрузка с сервисного аккаунта в «Мой диск» возвращает **403 (нет квоты у SA)** — файл остаётся в **текущей рабочей папке** проекта (`archive-context-…md`); его нужно **один раз вручную** перенести в `_lena/context` в UI Drive (или перенести рабочий корень на [общий диск](#общие-диски-shared-drives), где SA может создавать файлы).
-4. **Проверка:** `drive context-list <root>` — в списке должен появиться новый `.md`. В Telegram: `/context`.
-5. **`LENA_EXTRA_CONTEXT_FOLDERS`** для архива годится только если нужные файлы лежат **в корне** указанных папок (вложенность не индексируется). Для дерева «проект/подпапки/файлы» надёжнее именно **индекс** из шага 3 в `_lena/context`.
+4. **JSON-индекс для чеклиста форм (v2, один раз):**  
+   `node src/cli.js drive archive-index-build <2024> <2025> <2026> <корень_Лены> [maxDepth] [maxFiles]`  
+   Для **каждого** doc/pdf из архива скачивается текст (PDF/DOC/DOCX, при необходимости OCR), строится **профиль структуры** и **тип по содержимому** (имя файла не используется). Результат — `_lena/context/archive-documents-index.json` (version 2): проект, год, роль, `canonicalId`, `structureProfile`, `contentSnippet`, `textLength`. Чеклист «Подготовлю сама» читает только этот JSON.  
+   Переменные: `LENA_ARCHIVE_INDEX_RESUME=1` (продолжить с `.lena-archive-index-build-state.json`), `LENA_ARCHIVE_INDEX_LLM=1` (LLM только для `needsReview`), `LENA_ARCHIVE_INDEX_MAX_FILES`, `LENA_ARCHIVE_INDEX_CHECKPOINT`, `LENA_ARCHIVE_INDEX_OUT`.
+5. **Проверка:** `drive context-list <root>` — в списке должны быть `.md` и/или `archive-documents-index.json`. В Telegram: `/context`.
+6. **`LENA_EXTRA_CONTEXT_FOLDERS`** для архива годится только если нужные файлы лежат **в корне** указанных папок (вложенность не индексируется). Для дерева «проект/подпапки/файлы» надёжнее именно **индекс** из шагов 3–4 в `_lena/context`.
 
 Общая стратегия «архив vs короткие директивы» — в [LENA_CONTEXT_STRATEGY.md](LENA_CONTEXT_STRATEGY.md).
 
@@ -107,6 +111,7 @@ cd tender-prep
 | `drive corpus-pull <folder> <локальнаяПапка> [maxDepth] [maxFiles]` | Рекурсивная **выгрузка** файлов с Drive в локальную папку (сохранение путей). См. [CORPUS_AND_RAG.md](CORPUS_AND_RAG.md) |
 | `drive corpus-jsonl <folder> [maxDepth] [maxFiles]` | В stdout: **JSONL** — по строке на каждый файл (очередь для parserit). См. [PARSERIT_INTEGRATION.md](PARSERIT_INTEGRATION.md) |
 | `drive archive-context-build <архив> <корень_Лены> [maxDepth] [maxFiles]` | Рекурсивный обход архива → Markdown-индекс (проект / заказчик / участие) → загрузка в `_lena/context`; при 403 SA — файл в cwd, см. [раздел «Долгая память»](#lena-long-memory-archive) |
+| `drive archive-index-build <корни_2024…2026> <корень_Лены> [maxDepth] [maxFiles]` | JSON v2: извлечение текста + классификация по содержимому → `_lena/context/archive-documents-index.json` (resumable, см. env в разделе «Долгая память») |
 
 Низкоуровневые `list`, `meta`, `download`, `upload` сохраняются для произвольных путей.
 

@@ -39,6 +39,7 @@ import {
   loadCpSnapshotHints,
 } from "./cpSnapshotHints.js";
 import { loadOrgRequisitesFromEnv } from "./orgRequisitesDrive.js";
+import { buildTenderDocumentFormattingPromptSection } from "./tenderDocumentFormattingPrompt.js";
 
 const SUB_GS = LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG.gs_retail;
 const SUB_FN = LENA_COMPANY_SUBFOLDER_BY_OFFER_ORG.finselvat;
@@ -343,7 +344,10 @@ export async function runCommercialProposalDraftToDrive(userRootId, tenderId, op
     .join("\n");
 
   const messages = [
-    { role: "system", content: CP_SYSTEM_PROMPT },
+    {
+      role: "system",
+      content: [CP_SYSTEM_PROMPT, "", buildTenderDocumentFormattingPromptSection()].join("\n"),
+    },
     { role: "user", content: userMsg },
   ];
 

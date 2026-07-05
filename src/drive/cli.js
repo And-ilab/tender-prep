@@ -45,6 +45,7 @@ function usage() {
       "  drive corpus-pull <folderUrlOrId> <локальнаяПапка> [maxDepth] [maxFiles] — рекурсивная выгрузка файлов (архив → диск; Docs→txt, Sheets→csv)",
       "  drive corpus-jsonl <folderUrlOrId> [maxDepth] [maxFiles] — все файлы в stdout по одному JSON на строку (очередь для parserit / массового парсинга)",
       "  drive archive-context-build <archiveFolderUrl> <lenaRootUrl> [maxDepth] [maxFiles] — скан архива → Markdown-индекс → загрузка в _lena/context (при 403 квоты SA файл пишется в cwd см. JSON)",
+      "  drive archive-index-build <archiveRoot>… <lenaRootUrl> [maxDepth] [maxFiles] — JSON-индекс архива v2 (извлечение текста + тип по содержимому) → _lena/context/archive-documents-index.json",
       "",
       "Шаблоны, справочники, контекст:",
       "  drive templates-list <root>                  — файлы в _lena/templates",
@@ -61,6 +62,7 @@ function usage() {
       "",
       "Переменные: GOOGLE_DRIVE_CREDENTIALS (SA) **или** GOOGLE_DRIVE_OAUTH_CLIENT + GOOGLE_DRIVE_OAUTH_TOKEN (личный аккаунт); опционально LENA_DEFAULT_TENDER_YEAR, LENA_EXTRA_CONTEXT_FOLDERS.",
       "Для archive-context-build: LENA_ARCHIVE_CONTEXT_DRY=1 (без загрузки), LENA_ARCHIVE_CONTEXT_OUT=путь\\к\\файлу.md (сохранить копию локально), LENA_ARCHIVE_CUSTOMER_MARKERS / LENA_ARCHIVE_SUBMISSION_MARKERS — подстроки для классификации путей (через запятую).",
+      "Для archive-index-build: LENA_ARCHIVE_INDEX_RESUME=1 (checkpoint), LENA_ARCHIVE_INDEX_LLM=1 (LLM для needsReview), LENA_ARCHIVE_INDEX_MAX_FILES=N, LENA_ARCHIVE_INDEX_CHECKPOINT=путь, LENA_ARCHIVE_INDEX_OUT=путь\\к\\index.json, LENA_ARCHIVE_INDEX_DRY=1.",
       "См. docs/GOOGLE_DRIVE.md",
       "",
     ].join("\n"),
@@ -258,6 +260,49 @@ export async function runDrive(args) {
           maxFiles: maxFiles !== undefined && !Number.isNaN(maxFiles) ? maxFiles : undefined,
           dryRun,
           localMarkdownPath: localOut,
+          onProgress,
+        });
+        console.log(JSON.stringify(out, null, 2));
+      }
+      return;
+    }
+
+    if (cmd === "archive-index-build") {
+      if (!a || !b) usage();
+      else {
+        const positional = args.slice(1).filter(Boolean);
+        let maxDepth;
+        let maxFiles;
+        while (positional.length && /^\d+$/.test(String(positional[positional.length - 1]).trim())) {
+          const n = Number.parseInt(String(positional.pop()).trim(), 10);
+          if (maxFiles === undefined) maxFiles = n;
+          else if (maxDepth === undefined) maxDepth = n;
+          else break;
+        }
+        if (positional.length < 2) usage();
+        const lenaRoot = positional.pop();
+        const archiveRoots = positional.flatMap((part) =>
+          String(part)
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean),
+        );
+        if (!archiveRoots.length || !lenaRoot) usage();
+        const dryRun = process.env.LENA_ARCHIVE_INDEX_DRY === "1";
+        const localOut = process.env.LENA_ARCHIVE_INDEX_OUT?.trim() || undefined;
+        const useLlm = process.env.LENA_ARCHIVE_INDEX_LLM === "1";
+        const resume = process.env.LENA_ARCHIVE_INDEX_RESUME === "1";
+        const checkpointPath = process.env.LENA_ARCHIVE_INDEX_CHECKPOINT?.trim() || undefined;
+        const onProgress = (msg) => console.error(`[archive-index] ${msg}`);
+        const { buildArchiveDocumentsIndex } = await import("./archiveDocumentsIndex.js");
+        const out = await buildArchiveDocumentsIndex(archiveRoots, lenaRoot, {
+          maxDepth: maxDepth !== undefined && !Number.isNaN(maxDepth) ? maxDepth : undefined,
+          maxFiles: maxFiles !== undefined && !Number.isNaN(maxFiles) ? maxFiles : undefined,
+          dryRun,
+          localJsonPath: localOut,
+          useLlm,
+          resume,
+          checkpointPath,
           onProgress,
         });
         console.log(JSON.stringify(out, null, 2));

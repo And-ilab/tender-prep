@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { downloadFile } from "../drive/ops.js";
 import { extractBufferToText } from "../icetrade/inputDocumentsExtract.js";
 import { CANONICAL_DOCUMENT_TYPES, normalizeToCanonicalDocument } from "./canonicalDocumentTypes.js";
-import { fileMatchesCanonicalType } from "./resolveDocumentFormSource.js";
+import { fileMatchesCanonicalType, isBankReferenceFileStem } from "./resolveDocumentFormSource.js";
 import { extractFirstDateIso, extractPoaExpiryDateIso } from "./verifyDocumentAvailability.js";
 
 const FOLDER_MIME = "application/vnd.google-apps.folder";
@@ -20,6 +20,7 @@ const IMAGE_RE = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
  * @property {string | null} reportingPeriod
  * @property {boolean} needsReview
  * @property {string} [extractor]
+ * @property {number | null} [textLength]
  */
 
 /**
@@ -53,34 +54,42 @@ export function extractReportingPeriod(text) {
  * @param {string} text
  * @param {string} fileName
  * @param {string[]} [scopeIds] — ограничить поиск этими canonical id
+ * @param {{ includeTenderTypes?: boolean, textOnly?: boolean }} [opts]
  * @returns {{ canonicalId: string, title: string, score: number } | null}
  */
-export function classifyTextToCanonicalId(text, fileName, scopeIds) {
-  const blob = `${fileName}\n${text}`.toLowerCase();
+export function classifyTextToCanonicalId(text, fileName, scopeIds, opts = {}) {
+  const includeTenderTypes = opts.includeTenderTypes === true || Boolean(scopeIds?.length);
+  const textOnly = opts.textOnly === true;
+  const blob = textOnly ? String(text ?? "").toLowerCase() : `${fileName}\n${text}`.toLowerCase();
   /** @type {{ canonicalId: string, title: string, score: number } | null} */
   let best = null;
   for (const t of CANONICAL_DOCUMENT_TYPES) {
     if (scopeIds?.length && !scopeIds.includes(t.id)) continue;
-    if (t.storage !== "org" && t.storage !== "founding") continue;
+    if (!includeTenderTypes && t.storage !== "org" && t.storage !== "founding") continue;
     let score = 0;
-    if (fileMatchesCanonicalType(fileName, t.id)) score += 12;
+    if (!textOnly && fileMatchesCanonicalType(fileName, t.id)) score += 12;
     for (const syn of [t.title, ...t.synonyms]) {
       if (syn.length >= 4 && blob.includes(syn.toLowerCase())) score += 8;
     }
     if (t.id === "balance_sheet" && /форма\s*1|бухгалтерск/i.test(blob)) score += 6;
     if (t.id === "income_statement" && /форма\s*2|офр|финансовых\s+результат/i.test(blob)) score += 6;
     if (t.id === "bank_reference" && /справк\w*\s+(?:из\s+)?банк/i.test(blob)) score += 6;
+    if (!textOnly && t.id === "bank_reference" && isBankReferenceFileStem(fileName)) score += 10;
     if (t.id === "power_of_attorney" && /доверенност/i.test(blob)) score += 8;
     if (t.id === "reference_list" && /отзыв|референс|reference/i.test(blob)) score += 6;
+    if (t.id === "application_form" && /заявк\w*\s+на\s+участ/i.test(blob)) score += 8;
+    if (t.id === "reliability_letter" && /благонад/i.test(blob)) score += 8;
+    if (t.id === "commercial_proposal" && /коммерческ\w*\s+предлож/i.test(blob)) score += 8;
     if (!best || score > best.score) best = { canonicalId: t.id, title: t.title, score };
   }
-  if (!best || best.score < 10) {
+  if (!textOnly && (!best || best.score < 10)) {
     const n = normalizeToCanonicalDocument(fileName.replace(/\.[^.]+$/, ""));
     if (n.id !== "other" && (!scopeIds?.length || scopeIds.includes(n.id))) {
       return { canonicalId: n.id, title: n.title, score: 10 };
     }
     return null;
   }
+  if (textOnly && (!best || best.score < 10)) return null;
   return best;
 }
 
@@ -138,6 +147,7 @@ export async function extractAndIdentifyDriveFile(fileId, fileName, mimeType, op
       reportingPeriod,
       needsReview: !text || text.length < 40,
       extractor,
+      textLength: text.length || null,
     };
   } catch {
     const hit = classifyTextToCanonicalId("", fileName, opts.scopeIds);

@@ -36,6 +36,20 @@ describe("verifyDocumentAvailability", () => {
     assert.equal(hit.id, "10");
   });
 
+  it("findMatchingDriveFile matches short bank reference filename справка 1.10.pdf", () => {
+    const hit = findMatchingDriveFile([{ id: "11", name: "справка 1.10.pdf" }], "bank_reference");
+    assert.ok(hit);
+    assert.equal(hit.id, "11");
+  });
+
+  it("findMatchingDriveFile does not match TPP certificate as bank_reference", () => {
+    const hit = findMatchingDriveFile(
+      [{ id: "12", name: "справка ТПП происхождение.pdf" }],
+      "bank_reference",
+    );
+    assert.equal(hit, null);
+  });
+
   it("computeBankReferenceMaxDateIso returns first day of previous month", () => {
     assert.equal(computeBankReferenceMaxDateIso("15.03.2026"), "2026-02-01");
     assert.equal(computeBankReferenceMaxDateIso("2026-01-10"), "2025-12-01");
