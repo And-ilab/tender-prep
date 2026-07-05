@@ -317,8 +317,14 @@ const RESET_REPLY_BUTTON = "Перезапуск";
 
 /** @type {Map<number, { stopPulse: () => void, kind: string }>} */
 const activeLongOps = new Map();
+/** @type {Set<number>} */
+const importInFlightChats = new Set();
+/** @type {Map<number, number>} */
+const chatWorkGeneration = new Map();
 
 const KP_RUN_TIMEOUT_MS = Number.parseInt(process.env.LENA_KP_RUN_TIMEOUT_MS?.trim() ?? "720000", 10) || 720000;
+const IMPORT_RUN_TIMEOUT_MS =
+  Number.parseInt(process.env.LENA_IMPORT_RUN_TIMEOUT_MS?.trim() ?? "900000", 10) || 900000;
 
 /**
  * @param {Promise<T>} promise
@@ -399,6 +405,15 @@ function buildResetReplyKeyboard() {
  * @param {number} replyTo
  */
 async function resetChatSession(chatId, replyTo) {
+  // #region agent log
+  checklistDebug714167(
+    "lena-bot.mjs:resetChatSession",
+    "reset invoked",
+    { chatId, importInFlight: importInFlightChats.has(chatId) },
+    "H4",
+  );
+  // #endregion
+  chatWorkGeneration.set(chatId, (chatWorkGeneration.get(chatId) ?? 0) + 1);
   endLongOp(chatId);
   clearPendingStateForChat(chatId);
   await sendChatAction(chatId, CHAT_ACTION.TYPING).catch(() => {});
@@ -1132,6 +1147,35 @@ async function handleConversationTurn(chatId, replyTo, text) {
 }
 
 /**
+ * Запуск импорта IceTrade без блокировки цикла getUpdates.
+ * @returns {boolean}
+ */
+function launchIceTradeBootstrap(chatId, replyTo, text) {
+  const viewId = resolveIceTradeViewIdFromMessage(text);
+  if (!viewId) return false;
+  if (importInFlightChats.has(chatId)) {
+    void sendText(
+      chatId,
+      replyTo,
+      "Импорт IceTrade уже идёт в этом чате. Дождитесь завершения или нажмите «Перезапуск».",
+    ).catch(() => {});
+    return true;
+  }
+  // #region agent log
+  checklistDebug714167(
+    "lena-bot.mjs:launchIceTradeBootstrap",
+    "import dispatched non-blocking",
+    { chatId, viewId },
+    "H1",
+  );
+  // #endregion
+  void handleIceTradeBootstrap(chatId, replyTo, text).catch((e) => {
+    console.error("[lena-bot] handleIceTradeBootstrap:", e instanceof Error ? e.message : String(e));
+  });
+  return true;
+}
+
+/**
  * Импорт карточки IceTrade → Drive (группа и личка; в группе не требует @бота, если в тексте есть ссылка).
  * @returns {Promise<boolean>}
  */
@@ -1140,6 +1184,11 @@ async function handleIceTradeBootstrap(chatId, replyTo, text) {
   if (!viewId) return false;
 
   const first = viewId;
+  const workGen = chatWorkGeneration.get(chatId) ?? 0;
+  importInFlightChats.add(chatId);
+  // #region agent log
+  checklistDebug714167("lena-bot.mjs:handleIceTradeBootstrap", "import start", { chatId, viewId: first }, "H2");
+  // #endregion
   /** @type {number | undefined} */
   let progressMid;
   try {
@@ -1147,9 +1196,24 @@ async function handleIceTradeBootstrap(chatId, replyTo, text) {
     const importOnly = telegramIceTradeImportOnlyEnabled();
     progressMid = await sendMarkdownHtmlChunks(chatId, replyTo, iceTradeImportProgressMessage(first, importOnly));
     const stopPulse = startChatActionPulse(chatId, chatActionForIceTradeImport());
+    beginLongOp(chatId, stopPulse, "import");
     try {
-      const { markdown, viewId, provisionGate, inputsFolderWebViewLink, importSnapshot } =
-        await runIceTradeImportForMarkdown({ rootId, messageText: text });
+      const { markdown, viewId, provisionGate, inputsFolderWebViewLink, importSnapshot } = await withTimeout(
+        runIceTradeImportForMarkdown({ rootId, messageText: text }),
+        IMPORT_RUN_TIMEOUT_MS,
+        "Импорт IceTrade",
+      );
+      if ((chatWorkGeneration.get(chatId) ?? 0) !== workGen) {
+        // #region agent log
+        checklistDebug714167(
+          "lena-bot.mjs:handleIceTradeBootstrap",
+          "import result suppressed after reset",
+          { chatId, viewId: first },
+          "H4",
+        );
+        // #endregion
+        return true;
+      }
       const cbData = `${CB_PARSE_PREFIX}${viewId}`;
       const chainAnchor = typeof progressMid === "number" ? progressMid : replyTo;
 
@@ -1184,22 +1248,42 @@ async function handleIceTradeBootstrap(chatId, replyTo, text) {
         await sendMarkdownHtmlChunks(chatId, chainAnchor, markdown, parseKeyboard);
       }
     } finally {
-      stopPulse();
+      endLongOp(chatId);
     }
   } catch (e) {
     const err = e instanceof Error ? e.message : String(e);
-    const errAnchor = typeof progressMid === "number" ? progressMid : replyTo;
-    await sendTextChunks(
-      chatId,
-      errAnchor,
-      [
-        `IceTrade ${first}: не удалось выполнить bootstrap на Drive.`,
-        err.slice(0, 1200),
-        "",
-        "Проверьте учётные данные Google Drive (OAuth или GOOGLE_DRIVE_CREDENTIALS) и **LENA_DRIVE_ROOT**.",
-        `Вручную: \`node src/cli.js tenders icetrade-bootstrap <root> "${first}"\``,
-      ].join("\n"),
+    // #region agent log
+    checklistDebug714167(
+      "lena-bot.mjs:handleIceTradeBootstrap",
+      "import error",
+      { chatId, viewId: first, err: err.slice(0, 200) },
+      "H3",
     );
+    // #endregion
+    if ((chatWorkGeneration.get(chatId) ?? 0) === workGen) {
+      const errAnchor = typeof progressMid === "number" ? progressMid : replyTo;
+      await sendTextChunks(
+        chatId,
+        errAnchor,
+        [
+          `IceTrade ${first}: не удалось выполнить bootstrap на Drive.`,
+          err.slice(0, 1200),
+          "",
+          "Проверьте учётные данные Google Drive (OAuth или GOOGLE_DRIVE_CREDENTIALS) и **LENA_DRIVE_ROOT**.",
+          `Вручную: \`node src/cli.js tenders icetrade-bootstrap <root> "${first}"\``,
+        ].join("\n"),
+      );
+    }
+  } finally {
+    importInFlightChats.delete(chatId);
+    // #region agent log
+    checklistDebug714167(
+      "lena-bot.mjs:handleIceTradeBootstrap",
+      "import finished",
+      { chatId, viewId: first, workGen, currentGen: chatWorkGeneration.get(chatId) ?? 0 },
+      "H2",
+    );
+    // #endregion
   }
   return true;
 }
@@ -1210,7 +1294,7 @@ async function handleIceTradeBootstrap(chatId, replyTo, text) {
  */
 async function handlePlainMention(chatId, replyTo, text, chatType, msg) {
   if (iceTradeBootstrapShouldRun(text)) {
-    return handleIceTradeBootstrap(chatId, replyTo, text);
+    return launchIceTradeBootstrap(chatId, replyTo, text);
   }
 
   const isGroup = chatType === "group" || chatType === "supergroup";
@@ -3422,6 +3506,14 @@ async function main() {
       const replyTo = msg.message_id;
       if (typeof replyTo !== "number") continue;
       if (bodyText.trim() === RESET_REPLY_BUTTON) {
+        // #region agent log
+        checklistDebug714167(
+          "lena-bot.mjs:main",
+          "reset button in main loop",
+          { chatId, importInFlight: importInFlightChats.has(chatId) },
+          "H1",
+        );
+        // #endregion
         try {
           await resetChatSession(chatId, replyTo);
         } catch (e) {
@@ -3440,14 +3532,7 @@ async function main() {
       const parsed = parseCommand(bodyText);
       if (!parsed) {
         if (iceTradeBootstrapShouldRun(bodyText) && (t === "private" || isGroup)) {
-          try {
-            const handledIce = await handleIceTradeBootstrap(chatId, replyTo, bodyText);
-            if (handledIce) continue;
-          } catch (e) {
-            const err = e instanceof Error ? e.message : String(e);
-            await sendText(chatId, replyTo, `Ошибка: ${err.slice(0, 3500)}`);
-            continue;
-          }
+          if (launchIceTradeBootstrap(chatId, replyTo, bodyText)) continue;
         }
         const hk = historyKey(chatId);
         const hasAskHistory = (chatHistory.get(hk) ?? []).length > 0;
@@ -3456,14 +3541,7 @@ async function main() {
         const continueAskDialog = hasAskHistory && (t === "private" || isGroup);
         if (continueAskDialog) {
           if (iceTradeBootstrapShouldRun(bodyText)) {
-            try {
-              const handledIce = await handleIceTradeBootstrap(chatId, replyTo, bodyText);
-              if (handledIce) continue;
-            } catch (e) {
-              const err = e instanceof Error ? e.message : String(e);
-              await sendText(chatId, replyTo, `Ошибка: ${err.slice(0, 3500)}`);
-              continue;
-            }
+            if (launchIceTradeBootstrap(chatId, replyTo, bodyText)) continue;
           }
           if (isGroup && !groupAskHasProcurementContext(bodyText, msgForEntity)) {
             await sendText(chatId, replyTo, telegramTenderContextMissingHint());
@@ -3490,14 +3568,7 @@ async function main() {
         if (isLlmConfigured() && (t === "private" || isGroup)) {
           if (await handleConversationTurn(chatId, replyTo, bodyText)) continue;
           if (iceTradeBootstrapShouldRun(bodyText)) {
-            try {
-              const handledIce = await handleIceTradeBootstrap(chatId, replyTo, bodyText);
-              if (handledIce) continue;
-            } catch (e) {
-              const err = e instanceof Error ? e.message : String(e);
-              await sendText(chatId, replyTo, `Ошибка: ${err.slice(0, 3500)}`);
-              continue;
-            }
+            if (launchIceTradeBootstrap(chatId, replyTo, bodyText)) continue;
           }
           if (isGroup && !groupAskHasProcurementContext(bodyText, msgForEntity)) {
             await sendText(chatId, replyTo, telegramTenderContextMissingHint());
