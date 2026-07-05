@@ -438,15 +438,22 @@ export async function runCommercialProposalDraftToDrive(userRootId, tenderId, op
   let submissionFolderWebViewLink;
   if (offerOrg && isOfferOrgKey(offerOrg) && opts.structured && opts.requiredDocuments?.length) {
     try {
-      const manifest = await rebuildSubmissionPrintPackage(
-        userRootId,
-        tenderId,
-        offerOrg,
-        opts.structured,
-        opts.requiredDocuments,
-        treeOpts,
-        { corpus, runIngest: true, inputFiles: opts.inputFiles },
-      );
+      const rebuildMs =
+        Number.parseInt(process.env.LENA_SUBMISSION_SYNC_TIMEOUT_MS?.trim() ?? "180000", 10) || 180_000;
+      const manifest = await Promise.race([
+        rebuildSubmissionPrintPackage(
+          userRootId,
+          tenderId,
+          offerOrg,
+          opts.structured,
+          opts.requiredDocuments,
+          treeOpts,
+          { corpus, runIngest: true, inputFiles: opts.inputFiles },
+        ),
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error("submission sync timeout")), rebuildMs);
+        }),
+      ]);
       submissionFolderWebViewLink = manifest.submissionFolderWebViewLink;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

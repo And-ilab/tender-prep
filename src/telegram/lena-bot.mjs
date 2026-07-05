@@ -311,6 +311,108 @@ const CB_PARSE_ORG_GO = "lena_porg:g:";
 const CB_MGR_DOCS_DONE = "lena_docs:";
 const CB_MGR_DOCS_CONTINUE = "lena_docs_go:";
 const CB_IMPORT_DOCS_DONE = "lena_import_docs:";
+/** Сброс зависшего шага / индикатора «отправляет файл» в этом чате. */
+const CB_RESET = "lena_reset";
+
+/** @type {Map<number, { stopPulse: () => void, kind: string }>} */
+const activeLongOps = new Map();
+
+const KP_RUN_TIMEOUT_MS = Number.parseInt(process.env.LENA_KP_RUN_TIMEOUT_MS?.trim() ?? "720000", 10) || 720000;
+
+/**
+ * @param {Promise<T>} promise
+ * @param {number} ms
+ * @param {string} label
+ * @returns {Promise<T>}
+ * @template T
+ */
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(`${label}: превышено ${Math.round(ms / 60_000)} мин`)), ms);
+    }),
+  ]);
+}
+
+/**
+ * @param {number} chatId
+ * @param {() => void} stopPulse
+ * @param {string} kind
+ */
+function beginLongOp(chatId, stopPulse, kind) {
+  const prev = activeLongOps.get(chatId);
+  if (prev) prev.stopPulse();
+  activeLongOps.set(chatId, { stopPulse, kind });
+}
+
+/**
+ * @param {number} chatId
+ */
+function endLongOp(chatId) {
+  const op = activeLongOps.get(chatId);
+  if (op) {
+    op.stopPulse();
+    activeLongOps.delete(chatId);
+  }
+}
+
+/**
+ * @param {number} chatId
+ */
+function clearPendingStateForChat(chatId) {
+  for (const [k, v] of [...parseOrgPending.entries()]) {
+    if (v.chatId === chatId) {
+      unregisterManagerPriceAnchorsForToken(k);
+      parseOrgPending.delete(k);
+    }
+  }
+  for (const [k, v] of [...kpOrgPending.entries()]) {
+    if (v.chatId === chatId) {
+      unregisterManagerPriceAnchorsForToken(k);
+      kpOrgPending.delete(k);
+    }
+  }
+  for (const [k, v] of [...importDocsPending.entries()]) {
+    if (v.chatId === chatId) importDocsPending.delete(k);
+  }
+  for (const [k] of [...managerPriceAnchorByMessage.entries()]) {
+    if (k.startsWith(`${chatId}:`)) managerPriceAnchorByMessage.delete(k);
+  }
+}
+
+function buildResetInlineKeyboard() {
+  return { inline_keyboard: [[{ text: "Сбросить зависание", callback_data: CB_RESET }]] };
+}
+
+/**
+ * @param {number} chatId
+ * @param {number} replyTo
+ */
+async function resetChatSession(chatId, replyTo) {
+  endLongOp(chatId);
+  clearPendingStateForChat(chatId);
+  await sendChatAction(chatId, CHAT_ACTION.TYPING).catch(() => {});
+  await sendText(
+    chatId,
+    replyTo,
+    [
+      "Сброс выполнен.",
+      "Индикатор «отправляет файл» снят; незавершённые шаги тендера в этом чате очищены.",
+      "Если команды всё равно не доходят несколько минут — на сервере перезапустите процесс бота (systemctl).",
+      "Дальше: /tenderextract <номер> или /tenderkp <номер>.",
+    ].join("\n"),
+    buildResetInlineKeyboard(),
+  );
+}
+
+/**
+ * @param {number} chatId
+ * @param {number} replyTo
+ */
+async function cmdReset(chatId, replyTo) {
+  await resetChatSession(chatId, replyTo);
+}
 
 /** @param {ParseOrgPending} p */
 function tenderFlowPhase(p) {
@@ -893,6 +995,7 @@ function parseCommand(text) {
   /** Алиасы единым стилем */
   if (name === "askarchive") name = "archiveask";
   if (name === "searcharchive") name = "archivesearch";
+  if (name === "lena_reset") name = "reset";
   const args = rest.split(/\s+/).filter(Boolean);
   return { name, rest, args };
 }
@@ -1806,6 +1909,12 @@ async function handleCallbackQuery(cq) {
   }
   const msgId = replyTo;
 
+  if (data === CB_RESET) {
+    await answerCallbackQuery(id, "Сброс…");
+    await resetChatSession(chatId, msgId);
+    return;
+  }
+
   if (data.startsWith(CB_MGR_WIZ)) {
     const rest = data.slice(CB_MGR_WIZ.length);
     const parts = rest.split(":");
@@ -1995,9 +2104,14 @@ async function handleCallbackQuery(cq) {
     }
 
     const stopPulse = startChatActionPulse(chatId, chatActionForLlmDraft());
+    beginLongOp(chatId, stopPulse, "kp");
     try {
       assertCredentialsFile();
-      const r = await runCommercialProposalDraftToDrive(rootId, tenderId, { ...treeOpts, offerOrg });
+      const r = await withTimeout(
+        runCommercialProposalDraftToDrive(rootId, tenderId, { ...treeOpts, offerOrg }),
+        KP_RUN_TIMEOUT_MS,
+        "Формирование КП",
+      );
       if (!r.ok) {
         const w = r.warnings?.length ? `\n\n${r.warnings.slice(0, 5).join(" | ")}` : "";
         await sendText(chatId, msgId, `КП: ошибка — ${r.error || "неизвестно"}${w}`);
@@ -2006,9 +2120,14 @@ async function handleCallbackQuery(cq) {
       await sendText(chatId, msgId, buildCommercialProposalSuccessTelegram(r));
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e);
-      await sendText(chatId, msgId, `КП: ошибка — ${err.slice(0, 3500)}`);
+      await sendText(
+        chatId,
+        msgId,
+        `КП: ошибка — ${err.slice(0, 3500)}\n\nЕсли индикатор «отправляет файл» не пропал — /reset`,
+        buildResetInlineKeyboard(),
+      );
     } finally {
-      stopPulse();
+      endLongOp(chatId);
     }
     return;
   }
@@ -2335,15 +2454,20 @@ async function handleCallbackQuery(cq) {
     );
 
     const stopPulse = startChatActionPulse(chatId, chatActionForLlmDraft());
+    beginLongOp(chatId, stopPulse, "kp");
     try {
       assertCredentialsFile();
-      const r = await runCommercialProposalDraftToDrive(rootId, tenderId, {
-        ...treeOpts,
-        offerOrg,
-        structured: submissionCtx.structured,
-        requiredDocuments: submissionCtx.requiredDocuments,
-        corpus: submissionCtx.corpus,
-      });
+      const r = await withTimeout(
+        runCommercialProposalDraftToDrive(rootId, tenderId, {
+          ...treeOpts,
+          offerOrg,
+          structured: submissionCtx.structured,
+          requiredDocuments: submissionCtx.requiredDocuments,
+          corpus: submissionCtx.corpus,
+        }),
+        KP_RUN_TIMEOUT_MS,
+        "Формирование КП",
+      );
       if (!r.ok) {
         const w = r.warnings?.length ? `\n\n${r.warnings.slice(0, 5).join(" | ")}` : "";
         await sendText(chatId, headMid ?? msgId, `КП: ошибка — ${r.error || "неизвестно"}${w}`);
@@ -2352,9 +2476,14 @@ async function handleCallbackQuery(cq) {
       await sendText(chatId, headMid ?? msgId, buildCommercialProposalSuccessTelegram(r));
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e);
-      await sendText(chatId, headMid ?? msgId, `КП: ошибка — ${err.slice(0, 3500)}`);
+      await sendText(
+        chatId,
+        headMid ?? msgId,
+        `КП: ошибка — ${err.slice(0, 3500)}\n\nЕсли индикатор «отправляет файл» не пропал — /reset`,
+        buildResetInlineKeyboard(),
+      );
     } finally {
-      stopPulse();
+      endLongOp(chatId);
     }
     return;
   }
@@ -2795,6 +2924,7 @@ async function cmdHelp(chatId, replyTo) {
       "/tendercard <tender_id> [ГГГГ|flat] — карточка: текст из **inputs/** или **inputs/extracted** + HTML IceTrade + LLM",
       "/tenderkp <tender_id> [ГГГГ|flat] — КП (LLM): при необходимости мастер **цена → оплата → срок → гарантия** или **/tenderprice**; затем **ГС Ритейл** / **Финсельват** → **Сформировать КП** → **Google Doc** + Markdown в **drafts/** (**сначала** /tenderextract)",
       "/newchat — сбросить память для /ask в этом чате",
+      "/reset — сбросить зависший шаг тендера и индикатор «отправляет файл»",
       "/product — цель продукта (IceTrade, Drive, политика RAG-корпуса)",
       "/help — это сообщение",
       "",
@@ -3217,11 +3347,9 @@ async function main() {
 
       const rawCq = /** @type {{ callback_query?: Record<string, unknown> }} */ (u).callback_query;
       if (rawCq && typeof rawCq === "object" && rawCq.id != null) {
-        try {
-          await handleCallbackQuery(rawCq);
-        } catch (e) {
+        void handleCallbackQuery(rawCq).catch((e) => {
           console.error("[lena-bot] callback_query:", e instanceof Error ? e.message : String(e));
-        }
+        });
         continue;
       }
 
@@ -3442,6 +3570,9 @@ async function main() {
             break;
           case "newchat":
             await cmdNewChat(chatId, replyTo);
+            break;
+          case "reset":
+            await cmdReset(chatId, replyTo);
             break;
           case "archivesearch":
             await cmdArchiveSearch(chatId, replyTo, parsed.rest);
