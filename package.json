@@ -15,8 +15,13 @@
     "icetrade:diagnose-download-with-prime": "node scripts/icetrade-download-diagnose.mjs --demo --use-download-prime",
     "icetrade:diagnose-download-headless": "node scripts/icetrade-download-diagnose.mjs",
     "icetrade:headless-smoke": "node scripts/icetrade-headless-smoke.mjs",
+    "icetrade:fetch-page": "node scripts/icetrade-fetch-page.mjs",
+    "icetrade:connectivity": "node scripts/debug-icetrade-connectivity.mjs",
     "icetrade:smoke-demo-log": "node scripts/icetrade-headless-smoke.mjs --verbose",
-    "test": "node --test src/analysis/**/*.test.mjs src/drive/**/*.test.mjs src/icetrade/**/*.test.mjs src/telegram/**/*.test.mjs"
+    "test": "node --test src/analysis/**/*.test.mjs src/drive/**/*.test.mjs src/icetrade/**/*.test.mjs src/telegram/**/*.test.mjs src/kanban/**/*.test.mjs",
+    "kanban:serve": "node src/kanban/server.mjs",
+    "kanban:dev:ui": "npm run dev --prefix web/kanban",
+    "kanban:dev": "node src/kanban/server.mjs"
   },
   "engines": {
     "node": ">=20"

@@ -77,6 +77,9 @@ def _filter_file_hrefs(urls: list[tuple[str, str | None]]) -> list[str]:
         if t and FILE_EXT_RE.search(t) and ABS_GOSZ_GETFILE_RE.match(href):
             out.add(href)
     return sorted(out)
+
+
+def _collect_anchors(html: str, base: str) -> list[tuple[str, str | None]]:
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html, "html.parser")
@@ -101,19 +104,85 @@ def _filter_file_hrefs(urls: list[tuple[str, str | None]]) -> list[str]:
     return pairs
 
 
-def run_http(url: str, timeout: float) -> str:
-    import httpx
-
-    headers = {
+def _http_headers() -> dict[str, str]:
+    return {
         "User-Agent": UA,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.4",
         "Referer": "https://icetrade.by/",
     }
-    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-        r = client.get(url, headers=headers)
-        r.raise_for_status()
-        return r.text
+
+
+def _run_http_powershell(url: str, timeout: float) -> str:
+    import subprocess
+
+    sec = max(1, int(timeout))
+    escaped = url.replace("'", "''")
+    cmd = f"(Invoke-WebRequest -Uri '{escaped}' -UseBasicParsing -TimeoutSec {sec}).Content"
+    r = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", cmd],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout + 10,
+        check=False,
+    )
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip() or f"exit {r.returncode}"
+        raise RuntimeError(err)
+    html = r.stdout or ""
+    if len(html) < 100:
+        raise RuntimeError("empty or too short HTML from PowerShell")
+    return html
+
+
+def _run_http_curl(url: str, timeout: float) -> str:
+    import subprocess
+
+    sec = max(1, int(timeout))
+    r = subprocess.run(
+        ["curl", "-sSL", "--max-time", str(sec), "-A", UA, url],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout + 10,
+        check=False,
+    )
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip() or f"exit {r.returncode}"
+        raise RuntimeError(err)
+    return r.stdout
+
+
+def run_http(url: str, timeout: float) -> tuple[str, str]:
+    """GET HTML with fallbacks (httpx → PowerShell on Windows → curl)."""
+    headers = _http_headers()
+    errors: list[str] = []
+
+    try:
+        import httpx
+
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            r = client.get(url, headers=headers)
+            r.raise_for_status()
+            return r.text, "httpx"
+    except Exception as e:
+        errors.append(f"httpx:{e}")
+
+    if sys.platform == "win32":
+        try:
+            return _run_http_powershell(url, timeout), "powershell"
+        except Exception as e:
+            errors.append(f"powershell:{e}")
+
+    try:
+        return _run_http_curl(url, timeout), "curl"
+    except Exception as e:
+        errors.append(f"curl:{e}")
+
+    raise RuntimeError(" | ".join(errors) or "fetch failed")
 
 
 def run_playwright(
@@ -204,13 +273,12 @@ def main() -> int:
 
     try:
         if args.http_only:
-            html = run_http(page_url, timeout_s)
+            html, via = run_http(page_url, timeout_s)
             anchors = _collect_anchors(html, page_url)
             html_urls = set(_filter_file_hrefs(anchors))
             for x in _file_urls_from_text(html):
                 html_urls.add(x)
             xhr_urls: list[str] = []
-            via = "httpx"
         else:
             html, html_list, xhr_list = run_playwright(
                 page_url,
